@@ -1,0 +1,8 @@
+TODO:
+Fix build system to be on Vite/Rolldown instead of Webpack
+Figure out python codegen
+Figure out web interface/deploy plan
+Change theme to match Scratch by swapping renderer to zelos
+
+CONTRIBUTING GUIDE
+No AI code generation beyond single line completion, without discussing it first

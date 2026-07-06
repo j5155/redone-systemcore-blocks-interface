@@ -6,10 +6,11 @@ export default defineConfig({
   plugins: [
     vue(),
     ui({
+      prose: true,
       colorMode: false,
       ui: {
         colors: {
-          primary: 'red',
+          primary: 'teal',
           neutral: 'slate',
         },
       },

@@ -2,12 +2,18 @@ import * as Blockly from 'blockly';
 import 'blockly/blocks';
 import {pythonGenerator} from 'blockly/python';
 import {blocks} from '../src/blocks/text';
-import {addDevice, registerDeviceField, setDevices} from '../src/devices';
+import {
+  addDevice,
+  registerDeviceField,
+  serializeMovementMotorsConfig,
+  setDevices,
+} from '../src/devices';
 import {forBlock, generateOpmodeClass} from '../src/generators/python';
 import {extensionBlocks, extensionForBlock} from '../src/extensions';
 import {
   generateAllOpmodes,
   makeOpmodeState,
+  migrateWorkspaceState,
   opmodeInfoFromState,
 } from '../src/opmodes';
 import {buildToolbox, toolbox} from '../src/toolbox';
@@ -35,10 +41,10 @@ Object.assign(pythonGenerator.forBlock, extensionForBlock);
 const workspace = new Blockly.Workspace();
 // Motors live in the project-level registry now; adding one here makes it
 // register automatically in every generated opmode.
-const device = addDevice({name: 'drive_motor', bus: 0, deviceId: 3});
+const device = addDevice({name: 'drive_motor', bus: 3, deviceId: 0});
 
-const numberBlock = (value: number) => {
-  const block = workspace.newBlock('math_number');
+const numberBlock = (value: number, targetWorkspace = workspace) => {
+  const block = targetWorkspace.newBlock('math_number');
   block.setFieldValue(String(value), 'NUM');
   return block;
 };
@@ -94,6 +100,12 @@ extCall.setFieldValue('reset', 'METHOD');
 extCall.setFieldValue('', 'ARGS');
 runForSeconds.nextConnection!.connect(extCall.previousConnection!);
 
+// A second start hat should run beside the first one, not after it.
+const secondStartHat = workspace.newBlock('sc_on_start');
+const secondStartStop = workspace.newBlock('sc_motor_stop');
+setDevice(secondStartStop);
+connectStatement(secondStartHat, 'COMMANDS', secondStartStop);
+
 // Opmode-scoped trigger with any boolean condition.
 const trigger = workspace.newBlock('sc_trigger');
 trigger.setFieldValue('whileTrue', 'MODE');
@@ -106,15 +118,17 @@ connectStatement(trigger, 'COMMANDS', triggerStop);
 
 pythonGenerator.init(workspace);
 const opmodeCode = generateOpmodeClass(workspace, pythonGenerator);
-assertIncludes(opmodeCode, '@blocks_base_classes.Auto');
-assertIncludes(opmodeCode, "@blocks_base_classes.Name('Reach Zone')");
-assertIncludes(opmodeCode, "@blocks_base_classes.Group('Comp')");
-assertIncludes(opmodeCode, 'class ReachZone(wpilib.OpModeRobot):');
+assertIncludes(opmodeCode, '@autonomous');
+assertIncludes(opmodeCode, 'class ReachZone(wpilib.PeriodicOpMode):');
+assertIncludes(opmodeCode, 'def __init__(self):');
 assertIncludes(opmodeCode, 'def start(self):');
-assertIncludes(opmodeCode, 'self.drive_motor = rev.A301(0, 3)');
-assertIncludes(opmodeCode, 'commands2.CommandScheduler.getInstance().run()');
-assertIncludes(opmodeCode, 'commands2.InstantCommand(lambda: self.gyro.reset())');
-assertIncludes(opmodeCode, 'commands2.button.Trigger(lambda:');
+assertIncludes(opmodeCode, 'self.drive_motor = A301(0, 3)');
+assertIncludes(opmodeCode, 'self.main_command: Command | None = None');
+assertIncludes(opmodeCode, 'CommandScheduler.getInstance().run()');
+assertIncludes(opmodeCode, 'self.gyro.reset()');
+assertIncludes(opmodeCode, 'InstantCommand(self.block_');
+assertIncludes(opmodeCode, 'self.main_command = ParallelCommandGroup(');
+assertIncludes(opmodeCode, 'Trigger(lambda:');
 assertIncludes(opmodeCode, 'trigger_1.whileTrue(');
 
 // A disabled opmode still generates the class but no registration decorator.
@@ -122,14 +136,14 @@ details.setFieldValue('FALSE', 'ENABLED');
 pythonGenerator.init(workspace);
 const disabledCode = generateOpmodeClass(workspace, pythonGenerator);
 assert(
-  !disabledCode.includes('@blocks_base_classes.Auto'),
+  !disabledCode.includes('@autonomous'),
   'Disabled opmode should not emit a type decorator',
 );
 details.setFieldValue('TRUE', 'ENABLED');
 
 // ---------------------------------------------------------------------------
-// Gamepad wrappers: reading a gamepad button/axis/trigger sets up the shared
-// user-controls helper in start() and reaches the gamepad by port through it.
+// Gamepad wrappers: reading a gamepad button/axis/trigger creates the matching
+// wpilib.Gamepad in __init__ and uses that object in trigger conditions.
 // ---------------------------------------------------------------------------
 
 const gamepadTrigger = workspace.newBlock('sc_trigger');
@@ -144,14 +158,8 @@ connectStatement(gamepadTrigger, 'COMMANDS', gamepadStop);
 
 pythonGenerator.init(workspace);
 const gamepadCode = generateOpmodeClass(workspace, pythonGenerator);
-assertIncludes(
-  gamepadCode,
-  'self.userControls = blocks_base_classes.DefaultUserControls()',
-);
-assertIncludes(
-  gamepadCode,
-  'self.userControls.getGamepad(1).getEastFaceButtonPressed()',
-);
+assertIncludes(gamepadCode, 'self.gamepad2 = wpilib.Gamepad(1)');
+assertIncludes(gamepadCode, 'self.gamepad2.getEastFaceButtonPressed()');
 gamepadTrigger.dispose(true);
 
 // The gamepad category is Teleop-only: present when requested, absent from the
@@ -222,12 +230,16 @@ assert(
 powerBlock.dispose(true);
 
 // Adding a second motor makes it auto-register in generated opmodes too.
-addDevice({name: 'arm_motor', bus: 1, deviceId: 7});
+addDevice({name: 'arm_motor', bus: 7, deviceId: 1});
 const registrationCheck = generateAllOpmodes([
   {id: 'reg', state: makeOpmodeState('Teleop', 'Drive')},
 ]);
-assertIncludes(registrationCheck, 'self.drive_motor = rev.A301(0, 3)');
-assertIncludes(registrationCheck, 'self.arm_motor = rev.A301(1, 7)');
+assertIncludes(registrationCheck, 'from commands2 import *');
+assertIncludes(registrationCheck, 'from commands2.button import Trigger');
+assertIncludes(registrationCheck, 'from robot import teleop');
+assertIncludes(registrationCheck, 'class A301:');
+assertIncludes(registrationCheck, 'self.drive_motor = A301(0, 3)');
+assertIncludes(registrationCheck, 'self.arm_motor = A301(1, 7)');
 
 // Clearing the registry means no motors are registered.
 setDevices([]);
@@ -235,10 +247,153 @@ const emptyCheck = generateAllOpmodes([
   {id: 'empty', state: makeOpmodeState('Teleop', 'Drive')},
 ]);
 assert(
-  !emptyCheck.includes('rev.A301('),
+  !emptyCheck.includes(' = A301('),
   'No motors should be registered when the registry is empty',
 );
 setDevices([device]);
+
+// Older saved projects could contain a numeric A301 sensor block directly in a
+// Boolean condition socket. Migrate that shape before Blockly tries to load it.
+const staleSensorConditionState = makeOpmodeState('Teleop', 'Sensor Check');
+(
+  staleSensorConditionState as {
+    blocks: {blocks: Array<Record<string, unknown>>};
+  }
+).blocks.blocks.push({
+  type: 'sc_trigger',
+  inputs: {
+    CONDITION: {
+      block: {
+        type: 'sc_a301_sensor_value',
+        fields: {
+          DEVICE: device.id,
+          SENSOR: 'VELOCITY',
+        },
+      },
+    },
+    COMMANDS: {
+      block: {
+        type: 'sc_motor_stop',
+        fields: {
+          DEVICE: device.id,
+        },
+      },
+    },
+  },
+});
+const migratedSensorCondition = migrateWorkspaceState(
+  staleSensorConditionState,
+) as {blocks: {blocks: Array<{type?: string; inputs?: Record<string, {block?: {type?: string}}>}>}};
+const migratedTrigger = migratedSensorCondition.blocks.blocks.find(
+  (block) => block.type === 'sc_trigger',
+);
+assert(
+  migratedTrigger?.inputs?.CONDITION?.block?.type === 'logic_compare',
+  'Stale numeric sensor condition should be wrapped in a comparison',
+);
+const migratedWorkspace = new Blockly.Workspace();
+Blockly.serialization.workspaces.load(migratedSensorCondition, migratedWorkspace);
+migratedWorkspace.dispose();
+
+const migratedCode = generateAllOpmodes([
+  {id: 'stale-sensor', state: staleSensorConditionState},
+]);
+assertIncludes(migratedCode, 'Trigger(lambda:');
+assertIncludes(migratedCode, 'self.drive_motor.getEncoderVelocity().get() > 0');
+
+// ---------------------------------------------------------------------------
+// Drivetrain wrappers: one set-movement-motors block owns the motor choices,
+// and drive call blocks only supply movement values.
+// ---------------------------------------------------------------------------
+
+const rightMotor = addDevice({name: 'right_motor', bus: 4, deviceId: 2});
+const rearLeftMotor = addDevice({name: 'rear_left_motor', bus: 5, deviceId: 3});
+const frontRightMotor = addDevice({name: 'front_right_motor', bus: 6, deviceId: 4});
+const rearRightMotor = addDevice({name: 'rear_right_motor', bus: 7, deviceId: 5});
+
+const drivetrainWorkspace = new Blockly.Workspace();
+const movementMotors = drivetrainWorkspace.newBlock('sc_movement_motors');
+movementMotors.setFieldValue(
+  serializeMovementMotorsConfig({
+    kind: 'differential',
+    leftDeviceId: device.id,
+    rightDeviceId: rightMotor.id,
+  }),
+  'MOTORS',
+);
+assert(
+  movementMotors.getField('MOTORS')?.constructor.name === 'FieldMovementMotors',
+  'Movement motors block should use the popover summary field',
+);
+
+const drivetrainStart = drivetrainWorkspace.newBlock('sc_on_start');
+const arcadeDrive = drivetrainWorkspace.newBlock('sc_drivetrain_arcade_drive');
+assert(!arcadeDrive.getField('LEFT_DEVICE'), 'Drive blocks should not pick motors');
+connectValue(arcadeDrive, 'FORWARD', numberBlock(30, drivetrainWorkspace));
+connectValue(arcadeDrive, 'TURN', numberBlock(15, drivetrainWorkspace));
+connectStatement(drivetrainStart, 'COMMANDS', arcadeDrive);
+
+pythonGenerator.init(drivetrainWorkspace);
+const drivetrainCode = generateOpmodeClass(drivetrainWorkspace, pythonGenerator);
+assertIncludes(drivetrainCode, 'self.right_motor = A301(2, 4)');
+assertIncludes(drivetrainCode, 'self.movement_drive = wpilib.DifferentialDrive(');
+assertIncludes(drivetrainCode, 'lambda output: self.drive_motor.setThrottle(output),');
+assertIncludes(drivetrainCode, 'lambda output: self.right_motor.setThrottle(output),');
+assertIncludes(drivetrainCode, 'self.movement_drive.arcadeDrive(max(-1, min(1, (30) / 100.0)), max(-1, min(1, (15) / 100.0)))');
+
+movementMotors.setFieldValue(
+  serializeMovementMotorsConfig({
+    kind: 'mecanum',
+    frontLeftDeviceId: device.id,
+    rearLeftDeviceId: rearLeftMotor.id,
+    frontRightDeviceId: frontRightMotor.id,
+    rearRightDeviceId: rearRightMotor.id,
+  }),
+  'MOTORS',
+);
+arcadeDrive.dispose(true);
+const mecanumDrive = drivetrainWorkspace.newBlock('sc_mecanum_drive');
+connectValue(mecanumDrive, 'SIDEWAYS', numberBlock(10, drivetrainWorkspace));
+connectValue(mecanumDrive, 'FORWARD', numberBlock(20, drivetrainWorkspace));
+connectValue(mecanumDrive, 'TURN', numberBlock(5, drivetrainWorkspace));
+connectStatement(drivetrainStart, 'COMMANDS', mecanumDrive);
+
+pythonGenerator.init(drivetrainWorkspace);
+const mecanumCode = generateOpmodeClass(drivetrainWorkspace, pythonGenerator);
+assertIncludes(mecanumCode, 'self.rear_left_motor = A301(3, 5)');
+assertIncludes(mecanumCode, 'self.front_right_motor = A301(4, 6)');
+assertIncludes(mecanumCode, 'self.rear_right_motor = A301(5, 7)');
+assertIncludes(mecanumCode, 'self.movement_drive = wpilib.MecanumDrive(');
+assertIncludes(mecanumCode, 'lambda output: self.rear_left_motor.setThrottle(output),');
+assertIncludes(mecanumCode, 'lambda output: self.front_right_motor.setThrottle(output),');
+assertIncludes(mecanumCode, 'lambda output: self.rear_right_motor.setThrottle(output),');
+assertIncludes(mecanumCode, 'self.movement_drive.driveCartesian(max(-1, min(1, (10) / 100.0)), max(-1, min(1, (20) / 100.0)), max(-1, min(1, (5) / 100.0)))');
+drivetrainWorkspace.dispose();
+
+const motionCategory = toolbox.contents.find(
+  (item) => item.kind === 'category' && (item as {name?: string}).name === 'Motors',
+);
+const motionBlocks = JSON.stringify(motionCategory ?? {});
+assertIncludes(motionBlocks, 'sc_motor_set_power');
+assertIncludes(motionBlocks, 'sc_motor_run_for_seconds');
+assertIncludes(motionBlocks, 'sc_motor_stop');
+assert(
+  !motionBlocks.includes('sc_movement_motors') &&
+    !motionBlocks.includes('sc_drivetrain_arcade_drive'),
+  'Motors should keep motor blocks and not include drivetrain movement blocks',
+);
+
+const movementCategory = toolbox.contents.find(
+  (item) =>
+    item.kind === 'category' && (item as {name?: string}).name === 'Movement',
+);
+const movementBlocks = JSON.stringify(movementCategory ?? {});
+assertIncludes(movementBlocks, 'sc_movement_motors');
+assertIncludes(movementBlocks, 'sc_drivetrain_arcade_drive');
+assertIncludes(movementBlocks, 'sc_drivetrain_tank_drive');
+assertIncludes(movementBlocks, 'sc_drivetrain_stop');
+assertIncludes(movementBlocks, 'sc_mecanum_drive');
+assertIncludes(movementBlocks, 'sc_mecanum_stop');
 
 // ---------------------------------------------------------------------------
 // OpMode tabs: each tab is its own workspace + hat block, generating its own
@@ -251,10 +406,11 @@ assert(opmodeInfoFromState(teleopTab.state).type === 'Teleop', 'Bad tab info par
 assert(opmodeInfoFromState(autoTab.state).name === 'Score', 'Bad tab name parse');
 
 const multiCode = generateAllOpmodes([teleopTab, autoTab]);
-assertIncludes(multiCode, 'class Drive(wpilib.OpModeRobot):');
-assertIncludes(multiCode, 'class Score(wpilib.OpModeRobot):');
-assertIncludes(multiCode, '@blocks_base_classes.Teleop');
-assertIncludes(multiCode, '@blocks_base_classes.Auto');
+assertIncludes(multiCode, 'class Drive(wpilib.PeriodicOpMode):');
+assertIncludes(multiCode, 'class Score(wpilib.PeriodicOpMode):');
+assertIncludes(multiCode, '@teleop');
+assertIncludes(multiCode, '@autonomous');
+assertIncludes(multiCode, 'from robot import autonomous, teleop');
 
 workspace.dispose();
 console.log('Blockly smoke check passed');

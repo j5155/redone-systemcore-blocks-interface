@@ -47,6 +47,63 @@ const stopMotorBlock = (): ToolboxBlock => ({
   type: 'sc_motor_stop',
 });
 
+const movementMotorsBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_movement_motors',
+});
+
+const arcadeDriveBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_drivetrain_arcade_drive',
+  inputs: {
+    FORWARD: {
+      shadow: numberShadow(40),
+    },
+    TURN: {
+      shadow: numberShadow(0),
+    },
+  },
+});
+
+const tankDriveBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_drivetrain_tank_drive',
+  inputs: {
+    LEFT_POWER: {
+      shadow: numberShadow(40),
+    },
+    RIGHT_POWER: {
+      shadow: numberShadow(40),
+    },
+  },
+});
+
+const stopDrivetrainBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_drivetrain_stop',
+});
+
+const mecanumDriveBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_mecanum_drive',
+  inputs: {
+    SIDEWAYS: {
+      shadow: numberShadow(0),
+    },
+    FORWARD: {
+      shadow: numberShadow(40),
+    },
+    TURN: {
+      shadow: numberShadow(0),
+    },
+  },
+});
+
+const stopMecanumBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_mecanum_stop',
+});
+
 const sensorValueBlock = (): ToolboxBlock => ({
   kind: 'block',
   type: 'sc_a301_sensor_value',
@@ -158,7 +215,7 @@ export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
     },
     {
       kind: 'category',
-      name: 'Motion',
+      name: 'Motors',
       categorystyle: 'motion_category',
       cssConfig: categoryCss('motion'),
       contents: [
@@ -191,6 +248,20 @@ export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
             },
           },
         },
+      ],
+    },
+    {
+      kind: 'category',
+      name: 'Movement',
+      categorystyle: 'movement_category',
+      cssConfig: categoryCss('movement'),
+      contents: [
+        movementMotorsBlock(),
+        arcadeDriveBlock(),
+        tankDriveBlock(),
+        stopDrivetrainBlock(),
+        mecanumDriveBlock(),
+        stopMecanumBlock(),
       ],
     },
     {

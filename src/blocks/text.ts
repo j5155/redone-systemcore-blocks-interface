@@ -6,10 +6,11 @@
 
 import * as Blockly from 'blockly/core';
 import {a301MethodOptions, A301_VALUE_METHODS} from '../generated/a301';
-import {deviceField} from '../devices';
+import {deviceField, movementMotorsField} from '../devices';
 
 const eventsColour = '#FFBF00';
 const motionColour = '#4C97FF';
+const movementColour = "#FF4DCD";
 const controlColour = '#FFAB19';
 const sensingColour = '#5CB1D6';
 const advancedColour = '#5C81A6';
@@ -218,6 +219,111 @@ const scMotorSetPosition = {
   nextStatement: 'Command',
   colour: motionColour,
   tooltip: 'Asks the A301 to drive to a position setpoint.',
+  helpUrl: '',
+};
+
+const scMovementMotors = {
+  type: 'sc_movement_motors',
+  message0: 'set movement motors %1',
+  args0: [movementMotorsField()],
+  previousStatement: 'Setup',
+  nextStatement: 'Setup',
+  colour: movementColour,
+  tooltip:
+    'Choose the motors used by movement drive blocks. Click the summary to edit.',
+  helpUrl: '',
+};
+
+const scDrivetrainArcadeDrive = {
+  type: 'sc_drivetrain_arcade_drive',
+  message0: 'arcade drive forward %1 % turn %2 %',
+  args0: [
+    {
+      type: 'input_value',
+      name: 'FORWARD',
+      check: 'Number',
+    },
+    {
+      type: 'input_value',
+      name: 'TURN',
+      check: 'Number',
+    },
+  ],
+  previousStatement: 'Command',
+  nextStatement: 'Command',
+  colour: movementColour,
+  tooltip:
+    'Uses wpilib.DifferentialDrive arcadeDrive with two A301 motors.',
+  helpUrl: '',
+};
+
+const scDrivetrainTankDrive = {
+  type: 'sc_drivetrain_tank_drive',
+  message0: 'tank drive left power %1 % right power %2 %',
+  args0: [
+    {
+      type: 'input_value',
+      name: 'LEFT_POWER',
+      check: 'Number',
+    },
+    {
+      type: 'input_value',
+      name: 'RIGHT_POWER',
+      check: 'Number',
+    },
+  ],
+  previousStatement: 'Command',
+  nextStatement: 'Command',
+  colour: movementColour,
+  tooltip: 'Uses wpilib.DifferentialDrive tankDrive with two A301 motors.',
+  helpUrl: '',
+};
+
+const scDrivetrainStop = {
+  type: 'sc_drivetrain_stop',
+  message0: 'stop movement motors',
+  previousStatement: 'Command',
+  nextStatement: 'Command',
+  colour: movementColour,
+  tooltip: 'Stops the configured movement motors.',
+  helpUrl: '',
+};
+
+const scMecanumDrive = {
+  type: 'sc_mecanum_drive',
+  message0:
+    'mecanum drive sideways %1 % forward %2 % turn %3 %',
+  args0: [
+    {
+      type: 'input_value',
+      name: 'SIDEWAYS',
+      check: 'Number',
+    },
+    {
+      type: 'input_value',
+      name: 'FORWARD',
+      check: 'Number',
+    },
+    {
+      type: 'input_value',
+      name: 'TURN',
+      check: 'Number',
+    },
+  ],
+  previousStatement: 'Command',
+  nextStatement: 'Command',
+  colour: movementColour,
+  tooltip: 'Uses wpilib.MecanumDrive driveCartesian with four A301 motors.',
+  helpUrl: '',
+};
+
+const scMecanumStop = {
+  type: 'sc_mecanum_stop',
+  message0: 'stop mecanum movement',
+  previousStatement: 'Command',
+  nextStatement: 'Command',
+  colour: movementColour,
+  tooltip: 'Stops the configured mecanum movement motors.',
   helpUrl: '',
 };
 
@@ -533,6 +639,12 @@ export const blocks = Blockly.common.createBlockDefinitionsFromJsonArray([
   scMotorStop,
   scMotorSetVelocity,
   scMotorSetPosition,
+  scMovementMotors,
+  scDrivetrainArcadeDrive,
+  scDrivetrainTankDrive,
+  scDrivetrainStop,
+  scMecanumDrive,
+  scMecanumStop,
   scWaitSeconds,
   scRepeatCommands,
   scParallelCommands,

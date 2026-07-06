@@ -13,6 +13,7 @@ export const systemCoreTheme = Blockly.Theme.defineTheme('systemcore', {
   startHats: true,
   categoryStyles: {
     motion_category: {colour: '#4C97FF'},
+    movement_category: {colour: '#FF4DCD'},
     events_category: {colour: '#FFBF00'},
     control_category: {colour: '#FFAB19'},
     sensing_category: {colour: '#5CB1D6'},

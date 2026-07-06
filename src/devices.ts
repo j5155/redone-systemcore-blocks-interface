@@ -21,6 +21,20 @@ export type Device = {
   deviceId: number;
 };
 
+export type MovementMotorsConfig =
+  | {
+      kind: 'differential';
+      leftDeviceId: string;
+      rightDeviceId: string;
+    }
+  | {
+      kind: 'mecanum';
+      frontLeftDeviceId: string;
+      rearLeftDeviceId: string;
+      frontRightDeviceId: string;
+      rearRightDeviceId: string;
+    };
+
 const MISSING_DEVICE_LABEL = '(missing motor)';
 const EMPTY_DEVICE_LABEL = '(add a motor)';
 
@@ -46,6 +60,8 @@ export const getDevice = (id: string | null | undefined): Device | undefined =>
   id ? devices.find((device) => device.id === id) : undefined;
 
 const newDeviceId = () => `device-${Date.now().toString(36)}-${nextId++}`;
+
+const deviceIdAt = (index: number) => devices[index]?.id ?? '';
 
 /** A default name that doesn't collide with an existing motor. */
 const uniqueName = (base: string) => {
@@ -140,10 +156,305 @@ export class FieldDevice extends Blockly.FieldDropdown {
 
 export const DEVICE_FIELD_TYPE = 'field_device';
 
+export const defaultMovementMotorsConfig = (): MovementMotorsConfig => ({
+  kind: 'differential',
+  leftDeviceId: deviceIdAt(0),
+  rightDeviceId: deviceIdAt(1),
+});
+
+const normalizeDifferential = (
+  config: Partial<Extract<MovementMotorsConfig, {kind: 'differential'}>>,
+): MovementMotorsConfig => ({
+  kind: 'differential',
+  leftDeviceId: config.leftDeviceId || deviceIdAt(0),
+  rightDeviceId: config.rightDeviceId || deviceIdAt(1),
+});
+
+const normalizeMecanum = (
+  config: Partial<Extract<MovementMotorsConfig, {kind: 'mecanum'}>>,
+): MovementMotorsConfig => ({
+  kind: 'mecanum',
+  frontLeftDeviceId: config.frontLeftDeviceId || deviceIdAt(0),
+  rearLeftDeviceId: config.rearLeftDeviceId || deviceIdAt(1),
+  frontRightDeviceId: config.frontRightDeviceId || deviceIdAt(2),
+  rearRightDeviceId: config.rearRightDeviceId || deviceIdAt(3),
+});
+
+export const normalizeMovementMotorsConfig = (
+  config: MovementMotorsConfig,
+): MovementMotorsConfig =>
+  config.kind === 'mecanum'
+    ? normalizeMecanum(config)
+    : normalizeDifferential(config);
+
+export const parseMovementMotorsConfig = (
+  value: string | null | undefined,
+): MovementMotorsConfig => {
+  if (!value) return defaultMovementMotorsConfig();
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (parsed.kind === 'mecanum') {
+      return normalizeMecanum({
+        kind: 'mecanum',
+        frontLeftDeviceId: String(parsed.frontLeftDeviceId || ''),
+        rearLeftDeviceId: String(parsed.rearLeftDeviceId || ''),
+        frontRightDeviceId: String(parsed.frontRightDeviceId || ''),
+        rearRightDeviceId: String(parsed.rearRightDeviceId || ''),
+      });
+    }
+    return normalizeDifferential({
+      kind: 'differential',
+      leftDeviceId: String(parsed.leftDeviceId || ''),
+      rightDeviceId: String(parsed.rightDeviceId || ''),
+    });
+  } catch {
+    return defaultMovementMotorsConfig();
+  }
+};
+
+export const serializeMovementMotorsConfig = (
+  config: MovementMotorsConfig,
+) => JSON.stringify(normalizeMovementMotorsConfig(config));
+
+const movementMotorsValue = (config = defaultMovementMotorsConfig()) =>
+  serializeMovementMotorsConfig(config);
+
+const deviceLabel = (id: string, fallback: string) => {
+  if (!id) return fallback;
+  return getDevice(id)?.name ?? MISSING_DEVICE_LABEL;
+};
+
+export const movementMotorsSummary = (
+  value: string | null | undefined,
+) => {
+  const config = parseMovementMotorsConfig(value);
+  if (config.kind === 'mecanum') {
+    return [
+      'mecanum:',
+      `FL ${deviceLabel(config.frontLeftDeviceId, 'front left')}`,
+      `RL ${deviceLabel(config.rearLeftDeviceId, 'rear left')}`,
+      `FR ${deviceLabel(config.frontRightDeviceId, 'front right')}`,
+      `RR ${deviceLabel(config.rearRightDeviceId, 'rear right')}`,
+    ].join(' ');
+  }
+
+  return [
+    'tank:',
+    `left ${deviceLabel(config.leftDeviceId, 'left motor')}`,
+    `right ${deviceLabel(config.rightDeviceId, 'right motor')}`,
+  ].join(' ');
+};
+
+const fromDifferentialToMecanum = (
+  config: Extract<MovementMotorsConfig, {kind: 'differential'}>,
+) =>
+  normalizeMecanum({
+    kind: 'mecanum',
+    frontLeftDeviceId: config.leftDeviceId,
+    rearLeftDeviceId: config.leftDeviceId,
+    frontRightDeviceId: config.rightDeviceId,
+    rearRightDeviceId: config.rightDeviceId,
+  });
+
+const fromMecanumToDifferential = (
+  config: Extract<MovementMotorsConfig, {kind: 'mecanum'}>,
+) =>
+  normalizeDifferential({
+    kind: 'differential',
+    leftDeviceId: config.frontLeftDeviceId,
+    rightDeviceId: config.frontRightDeviceId,
+  });
+
+const changeMovementKind = (
+  config: MovementMotorsConfig,
+  kind: MovementMotorsConfig['kind'],
+) => {
+  if (config.kind === kind) return config;
+  if (kind === 'mecanum' && config.kind === 'differential') {
+    return fromDifferentialToMecanum(config);
+  }
+  if (kind === 'differential' && config.kind === 'mecanum') {
+    return fromMecanumToDifferential(config);
+  }
+  return config;
+};
+
+const movementDeviceOptions = (currentValue?: string): DropdownOption[] =>
+  deviceOptions(currentValue);
+
+const createOption = (label: string, value: string) => {
+  const option = document.createElement('option');
+  option.textContent = label;
+  option.value = value;
+  return option;
+};
+
+export class FieldMovementMotors extends Blockly.Field<string> {
+  override SERIALIZABLE = true;
+
+  constructor(value = movementMotorsValue()) {
+    super(value);
+  }
+
+  static fromJson(config: Blockly.FieldConfig): FieldMovementMotors {
+    const value = (config as Blockly.FieldConfig & {value?: string}).value;
+    return new FieldMovementMotors(value ?? movementMotorsValue());
+  }
+
+  protected override doClassValidation_(newValue?: string): string | null {
+    if (newValue == null) return null;
+    return serializeMovementMotorsConfig(parseMovementMotorsConfig(newValue));
+  }
+
+  protected override getText_(): string {
+    return movementMotorsSummary(this.getValue());
+  }
+
+  protected override showEditor_() {
+    const render = () => {
+      Blockly.DropDownDiv.clearContent();
+      const content = Blockly.DropDownDiv.getContentDiv();
+      const config = parseMovementMotorsConfig(this.getValue());
+      const wrapper = document.createElement('div');
+      wrapper.className =
+        'grid w-80 max-w-[calc(100vw-48px)] gap-2.5 p-3 font-sans text-slate-950';
+
+      const title = document.createElement('div');
+      title.className = 'text-sm font-extrabold';
+      title.textContent = 'Movement motors';
+      wrapper.appendChild(title);
+
+      const kindLabel = document.createElement('label');
+      kindLabel.className =
+        'grid grid-cols-[90px_minmax(0,1fr)] items-center gap-2.5 text-sm font-bold';
+      const kindText = document.createElement('span');
+      kindText.textContent = 'Drive type';
+      const kindSelect = document.createElement('select');
+      kindSelect.className =
+        'min-w-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm font-semibold text-slate-950 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20';
+      kindSelect.append(
+        createOption('tank / differential', 'differential'),
+        createOption('mecanum', 'mecanum'),
+      );
+      kindSelect.value = config.kind;
+      kindSelect.addEventListener('change', () => {
+        this.setValue(
+          serializeMovementMotorsConfig(
+            changeMovementKind(
+              parseMovementMotorsConfig(this.getValue()),
+              kindSelect.value === 'mecanum' ? 'mecanum' : 'differential',
+            ),
+          ),
+        );
+        render();
+      });
+      kindLabel.append(kindText, kindSelect);
+      wrapper.appendChild(kindLabel);
+
+      const addMotorSelect = (
+        labelText: string,
+        currentValue: string,
+        onChange: (value: string) => void,
+      ) => {
+        const label = document.createElement('label');
+        label.className =
+          'grid grid-cols-[90px_minmax(0,1fr)] items-center gap-2.5 text-sm font-bold';
+        const span = document.createElement('span');
+        span.textContent = labelText;
+        const select = document.createElement('select');
+        select.className =
+          'min-w-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm font-semibold text-slate-950 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20';
+        for (const [labelText, value] of movementDeviceOptions(currentValue)) {
+          select.appendChild(createOption(labelText, value));
+        }
+        select.value = currentValue;
+        select.addEventListener('change', () => {
+          onChange(select.value);
+          render();
+        });
+        label.append(span, select);
+        wrapper.appendChild(label);
+      };
+
+      if (config.kind === 'mecanum') {
+        addMotorSelect('Front left', config.frontLeftDeviceId, (value) =>
+          this.setValue(
+            serializeMovementMotorsConfig({
+              ...parseMovementMotorsConfig(this.getValue()),
+              kind: 'mecanum',
+              frontLeftDeviceId: value,
+            } as MovementMotorsConfig),
+          ),
+        );
+        addMotorSelect('Rear left', config.rearLeftDeviceId, (value) =>
+          this.setValue(
+            serializeMovementMotorsConfig({
+              ...parseMovementMotorsConfig(this.getValue()),
+              kind: 'mecanum',
+              rearLeftDeviceId: value,
+            } as MovementMotorsConfig),
+          ),
+        );
+        addMotorSelect('Front right', config.frontRightDeviceId, (value) =>
+          this.setValue(
+            serializeMovementMotorsConfig({
+              ...parseMovementMotorsConfig(this.getValue()),
+              kind: 'mecanum',
+              frontRightDeviceId: value,
+            } as MovementMotorsConfig),
+          ),
+        );
+        addMotorSelect('Rear right', config.rearRightDeviceId, (value) =>
+          this.setValue(
+            serializeMovementMotorsConfig({
+              ...parseMovementMotorsConfig(this.getValue()),
+              kind: 'mecanum',
+              rearRightDeviceId: value,
+            } as MovementMotorsConfig),
+          ),
+        );
+      } else {
+        addMotorSelect('Left motor', config.leftDeviceId, (value) =>
+          this.setValue(
+            serializeMovementMotorsConfig({
+              ...parseMovementMotorsConfig(this.getValue()),
+              kind: 'differential',
+              leftDeviceId: value,
+            } as MovementMotorsConfig),
+          ),
+        );
+        addMotorSelect('Right motor', config.rightDeviceId, (value) =>
+          this.setValue(
+            serializeMovementMotorsConfig({
+              ...parseMovementMotorsConfig(this.getValue()),
+              kind: 'differential',
+              rightDeviceId: value,
+            } as MovementMotorsConfig),
+          ),
+        );
+      }
+
+      const summary = document.createElement('div');
+      summary.className =
+        'rounded-lg bg-blue-50 px-2.5 py-2 text-xs font-bold leading-5 text-blue-800';
+      summary.textContent = movementMotorsSummary(this.getValue());
+      wrapper.appendChild(summary);
+      content.appendChild(wrapper);
+    };
+
+    render();
+    Blockly.DropDownDiv.setColour('#ffffff', '#4c97ff');
+    Blockly.DropDownDiv.showPositionedByField(this as unknown as Blockly.Field);
+  }
+}
+
+export const MOVEMENT_MOTORS_FIELD_TYPE = 'field_movement_motors';
+
 let fieldRegistered = false;
 export const registerDeviceField = () => {
   if (fieldRegistered) return;
   Blockly.fieldRegistry.register(DEVICE_FIELD_TYPE, FieldDevice);
+  Blockly.fieldRegistry.register(MOVEMENT_MOTORS_FIELD_TYPE, FieldMovementMotors);
   fieldRegistered = true;
 };
 
@@ -153,15 +464,23 @@ export const registerDeviceField = () => {
  */
 export const refreshDeviceFields = (workspace: Blockly.Workspace) => {
   for (const block of workspace.getAllBlocks(false)) {
-    const field = block.getField('DEVICE');
-    if (field instanceof FieldDevice) {
-      field.forceRerender();
+    for (const input of block.inputList) {
+      for (const field of input.fieldRow) {
+        if (field instanceof FieldDevice || field instanceof FieldMovementMotors) {
+          field.forceRerender();
+        }
+      }
     }
   }
 };
 
 /** Field definition helper for block JSON. */
-export const deviceField = () => ({
+export const deviceField = (name = 'DEVICE') => ({
   type: DEVICE_FIELD_TYPE,
-  name: 'DEVICE',
+  name,
+});
+
+export const movementMotorsField = () => ({
+  type: MOVEMENT_MOTORS_FIELD_TYPE,
+  name: 'MOTORS',
 });

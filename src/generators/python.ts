@@ -7,7 +7,13 @@
 import * as Blockly from 'blockly/core';
 import {Order, type PythonGenerator} from 'blockly/python';
 import {getA301Method} from '../generated/a301';
-import {getDevice, getDevices} from '../devices';
+import {
+  getDevice,
+  getDevices,
+  normalizeMovementMotorsConfig,
+  parseMovementMotorsConfig,
+  type MovementMotorsConfig,
+} from '../devices';
 
 // Export all the code generators for our custom blocks,
 // but don't register them with Blockly yet.
@@ -62,10 +68,17 @@ const safePythonIdentifier = (value: string | null, fallback: string) => {
   return pythonKeywords.has(withValidStart) ? `${withValidStart}_value` : withValidStart;
 };
 
-const deviceName = (block: Blockly.Block, _generator: PythonGenerator) => {
-  const deviceId = block.getFieldValue('DEVICE');
-  return getDevice(deviceId)?.name || 'drive_motor';
+const deviceNameForField = (
+  block: Blockly.Block,
+  fieldName: string,
+  fallback: string,
+) => {
+  const deviceId = block.getFieldValue(fieldName);
+  return getDevice(deviceId)?.name || fallback;
 };
+
+const deviceName = (block: Blockly.Block, _generator: PythonGenerator) =>
+  deviceNameForField(block, 'DEVICE', 'drive_motor');
 
 const deviceReference = (block: Blockly.Block, generator: PythonGenerator) =>
   `self.${safePythonIdentifier(deviceName(block, generator), 'drive_motor')}`;
@@ -88,13 +101,42 @@ const indentLines = (lines: string[], spaces: number) => {
   return lines.map((line) => `${indent}${line}`).join('\n');
 };
 
+const indentCode = (code: string, spaces: number) => {
+  const indent = ' '.repeat(spaces);
+  return code
+    .split('\n')
+    .map((line) => (line ? `${indent}${line}` : ''))
+    .join('\n');
+};
+
 const stripCommandComma = (line: string) => line.replace(/,\s*$/, '');
 
 const percentToThrottle = (power: string) =>
   `max(-1, min(1, (${power}) / 100.0))`;
 
+// --- Block-method extraction ------------------------------------------------
+// Each command's action becomes a named method (def block_N) on the opmode
+// class, and the command references that method by name instead of inlining a
+// lambda — matching the hand-written opmode style. The registry is reset at the
+// start of every generateOpmodeClass() call.
+let blockMethodBodies: string[] = [];
+
+const resetBlockMethods = () => {
+  blockMethodBodies = [];
+};
+
+const registerBlockMethod = (statement: string): string => {
+  const name = `block_${blockMethodBodies.length + 1}`;
+  blockMethodBodies.push(`    def ${name}(self):\n${indentCode(statement, 8)}`);
+  return `self.${name}`;
+};
+
+// An InstantCommand whose action is hoisted into a block_N method.
+export const instantCommandExpr = (pythonCall: string) =>
+  `InstantCommand(${registerBlockMethod(pythonCall)})`;
+
 const instantCommand = (pythonCall: string) =>
-  `commands2.InstantCommand(lambda: ${pythonCall}),\n`;
+  `${instantCommandExpr(pythonCall)},\n`;
 
 const methodCall = (block: Blockly.Block, generator: PythonGenerator) => {
   const method = getA301Method(block.getFieldValue('METHOD'));
@@ -108,12 +150,32 @@ const commandLinesForStatement = (
   inputName: string,
 ) => compactStatementLines(generator.statementToCode(block, inputName));
 
-const commandGroupExpression = (commands: string[]) => {
+const commandGroupExpression = (commands: string[]) =>
+  commands.length
+    ? `SequentialCommandGroup(${commands.map(stripCommandComma).join(', ')})`
+    : 'SequentialCommandGroup()';
+
+// The opmode's main command, formatted across multiple lines like the
+// hand-written style (one command per line).
+const mainCommandExpression = (commands: string[]) => {
   const commandExpressions = commands.map(stripCommandComma);
   if (!commandExpressions.length) {
-    return 'commands2.InstantCommand(lambda: None)';
+    return 'SequentialCommandGroup()';
   }
-  return `commands2.SequentialCommandGroup(${commandExpressions.join(', ')})`;
+  const inner = commandExpressions
+    .map((expression) => `            ${expression}`)
+    .join(',\n');
+  return `SequentialCommandGroup(\n${inner}\n        )`;
+};
+
+const startCommandExpression = (commandStacks: string[][]) => {
+  if (!commandStacks.length) return 'SequentialCommandGroup()';
+  if (commandStacks.length === 1) return mainCommandExpression(commandStacks[0]);
+
+  const inner = commandStacks
+    .map((commands) => `            ${commandGroupExpression(commands)}`)
+    .join(',\n');
+  return `ParallelCommandGroup(\n${inner}\n        )`;
 };
 
 const pascalCaseIdentifier = (value: string | null, fallback: string) => {
@@ -127,9 +189,9 @@ const pascalCaseIdentifier = (value: string | null, fallback: string) => {
 };
 
 const OPMODE_TYPE_TO_DECORATOR: Record<string, string> = {
-  Teleop: 'Teleop',
-  Auto: 'Auto',
-  Utility: 'Utility',
+  Teleop: 'teleop',
+  Auto: 'autonomous',
+  Utility: 'utility',
 };
 
 // The opmode hats don't emit code on their own; the class is assembled from all
@@ -139,6 +201,7 @@ forBlock['sc_opmode_details'] = () => '';
 forBlock['sc_on_setup'] = () => '';
 forBlock['sc_on_start'] = () => '';
 forBlock['sc_trigger'] = () => '';
+forBlock['sc_movement_motors'] = () => '';
 
 const GAMEPAD_BLOCK_TYPES = [
   'sc_gamepad_button',
@@ -146,27 +209,130 @@ const GAMEPAD_BLOCK_TYPES = [
   'sc_gamepad_trigger',
 ] as const;
 
-// Gamepad dropdown value ('1' / '2') → Driver Station port (0 / 1).
-const gamepadPort = (block: Blockly.Block) =>
-  block.getFieldValue('GAMEPAD') === '2' ? '1' : '0';
+const DIFFERENTIAL_DRIVETRAIN_BLOCK_TYPES = [
+  'sc_drivetrain_arcade_drive',
+  'sc_drivetrain_tank_drive',
+  'sc_drivetrain_stop',
+] as const;
 
-// Gamepads are owned by the shared user-controls helper the runtime provides
-// (blocks_base_classes.DefaultUserControls), not instantiated per opmode; reads
-// reach them by port. See ../../systemcore-blocks-interface user_controls.py.
-const gamepadReference = (block: Blockly.Block) =>
-  `self.userControls.getGamepad(${gamepadPort(block)})`;
+const MECANUM_DRIVETRAIN_BLOCK_TYPES = [
+  'sc_mecanum_drive',
+  'sc_mecanum_stop',
+] as const;
 
-const usesGamepad = (workspace: Blockly.Workspace) =>
-  GAMEPAD_BLOCK_TYPES.some(
+type DrivetrainKind = 'differential' | 'mecanum';
+
+type DrivetrainConfig = {
+  kind: DrivetrainKind;
+  name: string;
+  motorNames: string[];
+};
+
+const MOVEMENT_MOTORS_BLOCK_TYPE = 'sc_movement_motors';
+const MOVEMENT_DRIVE_NAME = 'movement_drive';
+
+const movementDriveBlockTypes = [
+  ...DIFFERENTIAL_DRIVETRAIN_BLOCK_TYPES,
+  ...MECANUM_DRIVETRAIN_BLOCK_TYPES,
+] as const;
+
+const movementDriveNeeded = (workspace: Blockly.Workspace) =>
+  workspace.getBlocksByType(MOVEMENT_MOTORS_BLOCK_TYPE, false).length > 0 ||
+  movementDriveBlockTypes.some(
     (type) => workspace.getBlocksByType(type, false).length > 0,
   );
+
+const motorNameForDeviceId = (id: string, fallback: string) =>
+  safePythonIdentifier(getDevice(id)?.name || fallback, fallback);
+
+const movementMotorsConfigInWorkspace = (
+  workspace: Blockly.Workspace,
+): MovementMotorsConfig => {
+  const block = workspace.getBlocksByType(MOVEMENT_MOTORS_BLOCK_TYPE, false)[0];
+  return normalizeMovementMotorsConfig(
+    parseMovementMotorsConfig(block?.getFieldValue('MOTORS')),
+  );
+};
+
+const movementDrivetrainConfig = (
+  workspace: Blockly.Workspace,
+): DrivetrainConfig => {
+  const config = movementMotorsConfigInWorkspace(workspace);
+  if (config.kind === 'mecanum') {
+    return {
+      kind: 'mecanum',
+      name: MOVEMENT_DRIVE_NAME,
+      motorNames: [
+        motorNameForDeviceId(config.frontLeftDeviceId, 'front_left_motor'),
+        motorNameForDeviceId(config.rearLeftDeviceId, 'rear_left_motor'),
+        motorNameForDeviceId(config.frontRightDeviceId, 'front_right_motor'),
+        motorNameForDeviceId(config.rearRightDeviceId, 'rear_right_motor'),
+      ],
+    };
+  }
+
+  return {
+    kind: 'differential',
+    name: MOVEMENT_DRIVE_NAME,
+    motorNames: [
+      motorNameForDeviceId(config.leftDeviceId, 'left_motor'),
+      motorNameForDeviceId(config.rightDeviceId, 'right_motor'),
+    ],
+  };
+};
+
+const drivetrainInitLines = (config: DrivetrainConfig) => {
+  const motorSetter = (motorName: string) =>
+    `lambda output: self.${motorName}.setThrottle(output)`;
+
+  if (config.kind === 'differential') {
+    const [leftMotor, rightMotor] = config.motorNames;
+    return [
+      `        self.${config.name} = wpilib.DifferentialDrive(`,
+      `            ${motorSetter(leftMotor)},`,
+      `            ${motorSetter(rightMotor)},`,
+      '        )',
+    ];
+  }
+
+  const [frontLeft, rearLeft, frontRight, rearRight] = config.motorNames;
+  return [
+    `        self.${config.name} = wpilib.MecanumDrive(`,
+    `            ${motorSetter(frontLeft)},`,
+    `            ${motorSetter(rearLeft)},`,
+    `            ${motorSetter(frontRight)},`,
+    `            ${motorSetter(rearRight)},`,
+    '        )',
+  ];
+};
+
+const movementDriveReference = () => `self.${MOVEMENT_DRIVE_NAME}`;
+
+// Gamepad dropdown value ('1' / '2') -> Driver Station port (0 / 1).
+const gamepadNumber = (block: Blockly.Block) =>
+  block.getFieldValue('GAMEPAD') === '2' ? '2' : '1';
+
+const gamepadPort = (gamepad: string) => (gamepad === '2' ? '1' : '0');
+
+const gamepadReference = (block: Blockly.Block) =>
+  `self.gamepad${gamepadNumber(block)}`;
+
+const gamepadsInWorkspace = (workspace: Blockly.Workspace) => {
+  const gamepads = new Set<string>();
+  for (const type of GAMEPAD_BLOCK_TYPES) {
+    for (const block of workspace.getBlocksByType(type, false)) {
+      gamepads.add(gamepadNumber(block));
+    }
+  }
+  return [...gamepads].sort();
+};
 
 const buildTriggerLines = (
   triggers: Blockly.Block[],
   generator: PythonGenerator,
 ) => {
   if (!triggers.length) return [];
-  const lines = ['        self.triggers = []'];
+  const lines: string[] = [];
   triggers.forEach((trigger, index) => {
     const condition = valueToCode(trigger, generator, 'CONDITION', 'False');
     const mode =
@@ -174,10 +340,10 @@ const buildTriggerLines = (
     const commands = commandLinesForStatement(trigger, generator, 'COMMANDS');
     const name = `trigger_${index + 1}`;
     lines.push(
-      `        ${name} = commands2.button.Trigger(lambda: ${condition})`,
+      `        ${name} = Trigger(lambda: ${condition})`,
       `        ${name}.${mode}(${commandGroupExpression(commands)})`,
-      `        self.triggers.append(${name})`,
     );
+    if (index < triggers.length - 1) lines.push('');
   });
   return lines;
 };
@@ -192,11 +358,11 @@ export const generateOpmodeClass = (
   workspace: Blockly.Workspace,
   generator: PythonGenerator,
 ): string => {
+  resetBlockMethods();
   const details = workspace.getBlocksByType('sc_opmode_details', false)[0];
   const type = details?.getFieldValue('TYPE') || 'Teleop';
   const enabled = details ? details.getFieldValue('ENABLED') === 'TRUE' : true;
   const name = (details?.getFieldValue('NAME') || '').trim();
-  const group = (details?.getFieldValue('GROUP') || '').trim();
   const description = (details?.getFieldValue('DESCRIPTION') || '').trim();
   const className = pascalCaseIdentifier(name, 'MyOpMode');
 
@@ -207,57 +373,66 @@ export const generateOpmodeClass = (
     );
   }
 
-  const startCommands: string[] = [];
-  for (const hat of workspace.getBlocksByType('sc_on_start', false)) {
-    startCommands.push(...commandLinesForStatement(hat, generator, 'COMMANDS'));
-  }
-
   const triggerLines = buildTriggerLines(
     workspace.getBlocksByType('sc_trigger', false),
     generator,
   );
 
-  const decorators: string[] = [];
-  if (enabled) {
-    decorators.push(
-      `@blocks_base_classes.${OPMODE_TYPE_TO_DECORATOR[type] || 'Teleop'}`,
-    );
-    if (name) {
-      decorators.push(`@blocks_base_classes.Name('${name.replace(/'/g, "\\'")}')`);
-    }
-    if (group) {
-      decorators.push(`@blocks_base_classes.Group('${group.replace(/'/g, "\\'")}')`);
-    }
+  const startCommandStacks: string[][] = [];
+  for (const hat of workspace.getBlocksByType('sc_on_start', false)) {
+    startCommandStacks.push(commandLinesForStatement(hat, generator, 'COMMANDS'));
   }
 
-  const startBody: string[] = [];
-  // Every motor in the project registry is constructed automatically at the top
-  // of start(); there is no per-opmode "register motor" block anymore.
-  for (const device of getDevices()) {
-    const motor = safePythonIdentifier(device.name, 'drive_motor');
-    startBody.push(`        self.${motor} = rev.A301(${device.bus}, ${device.deviceId})`);
+  const decorators: string[] = [];
+  if (enabled) {
+    decorators.push(`@${OPMODE_TYPE_TO_DECORATOR[type] || 'teleop'}`);
   }
-  if (usesGamepad(workspace)) {
-    startBody.push(
-      '        self.userControls = blocks_base_classes.DefaultUserControls()',
+
+  const initBody: string[] = ['        super().__init__()'];
+  initBody.push('');
+  for (const gamepad of gamepadsInWorkspace(workspace)) {
+    initBody.push(
+      `        self.gamepad${gamepad} = wpilib.Gamepad(${gamepadPort(gamepad)})`,
     );
   }
-  if (setupLines.length) startBody.push(indentLines(setupLines, 8));
-  if (triggerLines.length) startBody.push(...triggerLines);
+  // Every motor in the project registry is constructed automatically at the top
+  // of __init__(); there is no per-opmode "register motor" block anymore.
+  for (const device of getDevices()) {
+    const motor = safePythonIdentifier(device.name, 'drive_motor');
+    initBody.push(`        self.${motor} = A301(${device.deviceId}, ${device.bus})`);
+  }
+  if (movementDriveNeeded(workspace)) {
+    initBody.push(...drivetrainInitLines(movementDrivetrainConfig(workspace)));
+  }
+  if (setupLines.length) initBody.push(indentLines(setupLines, 8));
+  initBody.push('        self.main_command: Command | None = None');
+
+  const startBody: string[] = [];
+  if (triggerLines.length) startBody.push(...triggerLines, '');
   startBody.push(
-    '        self.main_command = ' + commandGroupExpression(startCommands),
+    '        self.main_command = ' + startCommandExpression(startCommandStacks),
   );
   startBody.push('        self.main_command.schedule()');
+  const blockMethodLines: string[] = [];
+  blockMethodBodies.forEach((body, index) => {
+    if (index > 0) blockMethodLines.push('');
+    blockMethodLines.push(body);
+  });
 
   const lines = [
     ...(description ? [`# ${description}`] : []),
     ...decorators,
-    `class ${className}(wpilib.OpModeRobot):`,
+    `class ${className}(wpilib.PeriodicOpMode):`,
+    '    def __init__(self):',
+    ...initBody,
+    '',
+    ...blockMethodLines,
+    ...(blockMethodLines.length ? [''] : []),
     '    def start(self):',
     ...startBody,
     '',
     '    def periodic(self):',
-    '        commands2.CommandScheduler.getInstance().run()',
+    '        CommandScheduler.getInstance().run()',
     '',
     '    def end(self):',
     '        if self.main_command:',
@@ -283,13 +458,7 @@ forBlock['sc_motor_run_for_seconds'] = function (
   const motor = deviceReference(block, generator);
   const power = valueToCode(block, generator, 'POWER', '50');
   const seconds = valueToCode(block, generator, 'SECONDS', '1');
-  return [
-    'commands2.SequentialCommandGroup(',
-    `commands2.InstantCommand(lambda: ${motor}.setThrottle(${percentToThrottle(power)})), `,
-    `commands2.WaitCommand(${seconds}), `,
-    `commands2.InstantCommand(lambda: ${motor}.setThrottle(0))`,
-    '),\n',
-  ].join('');
+  return `SequentialCommandGroup(${instantCommandExpr(`${motor}.setThrottle(${percentToThrottle(power)})`)}, WaitCommand(${seconds}), ${instantCommandExpr(`${motor}.setThrottle(0)`)}),\n`;
 };
 
 forBlock['sc_motor_stop'] = function (
@@ -315,12 +484,54 @@ forBlock['sc_motor_set_position'] = function (
   return instantCommand(`${deviceReference(block, generator)}.setPosition(${position})`);
 };
 
+forBlock['sc_drivetrain_arcade_drive'] = function (
+  block: Blockly.Block,
+  generator: PythonGenerator,
+) {
+  const forward = valueToCode(block, generator, 'FORWARD', '0');
+  const turn = valueToCode(block, generator, 'TURN', '0');
+  return instantCommand(
+    `${movementDriveReference()}.arcadeDrive(${percentToThrottle(forward)}, ${percentToThrottle(turn)})`,
+  );
+};
+
+forBlock['sc_drivetrain_tank_drive'] = function (
+  block: Blockly.Block,
+  generator: PythonGenerator,
+) {
+  const leftPower = valueToCode(block, generator, 'LEFT_POWER', '0');
+  const rightPower = valueToCode(block, generator, 'RIGHT_POWER', '0');
+  return instantCommand(
+    `${movementDriveReference()}.tankDrive(${percentToThrottle(leftPower)}, ${percentToThrottle(rightPower)})`,
+  );
+};
+
+forBlock['sc_drivetrain_stop'] = function (block: Blockly.Block) {
+  return instantCommand(`${movementDriveReference()}.stopMotor()`);
+};
+
+forBlock['sc_mecanum_drive'] = function (
+  block: Blockly.Block,
+  generator: PythonGenerator,
+) {
+  const sideways = valueToCode(block, generator, 'SIDEWAYS', '0');
+  const forward = valueToCode(block, generator, 'FORWARD', '0');
+  const turn = valueToCode(block, generator, 'TURN', '0');
+  return instantCommand(
+    `${movementDriveReference()}.driveCartesian(${percentToThrottle(sideways)}, ${percentToThrottle(forward)}, ${percentToThrottle(turn)})`,
+  );
+};
+
+forBlock['sc_mecanum_stop'] = function (block: Blockly.Block) {
+  return instantCommand(`${movementDriveReference()}.stopMotor()`);
+};
+
 forBlock['sc_wait_seconds'] = function (
   block: Blockly.Block,
   generator: PythonGenerator,
 ) {
   const seconds = valueToCode(block, generator, 'SECONDS', '1');
-  return `commands2.WaitCommand(${seconds}),\n`;
+  return `WaitCommand(${seconds}),\n`;
 };
 
 forBlock['sc_repeat_commands'] = function (
@@ -333,9 +544,9 @@ forBlock['sc_repeat_commands'] = function (
   ).map(stripCommandComma);
   const sequence = innerCommands.length
     ? innerCommands.join(', ')
-    : 'commands2.InstantCommand(lambda: None)';
+    : instantCommandExpr('pass');
 
-  return `commands2.SequentialCommandGroup(*[commands2.SequentialCommandGroup(${sequence}) for _ in range(int(${times}))]),\n`;
+  return `SequentialCommandGroup(*[SequentialCommandGroup(${sequence}) for _ in range(int(${times}))]),\n`;
 };
 
 forBlock['sc_parallel_commands'] = function (
@@ -344,7 +555,7 @@ forBlock['sc_parallel_commands'] = function (
 ) {
   const firstCommands = commandLinesForStatement(block, generator, 'FIRST');
   const secondCommands = commandLinesForStatement(block, generator, 'SECOND');
-  return `commands2.ParallelCommandGroup(${commandGroupExpression(firstCommands)}, ${commandGroupExpression(secondCommands)}),\n`;
+  return `ParallelCommandGroup(${commandGroupExpression(firstCommands)}, ${commandGroupExpression(secondCommands)}),\n`;
 };
 
 forBlock['sc_race_commands'] = function (
@@ -353,7 +564,7 @@ forBlock['sc_race_commands'] = function (
 ) {
   const firstCommands = commandLinesForStatement(block, generator, 'FIRST');
   const secondCommands = commandLinesForStatement(block, generator, 'SECOND');
-  return `commands2.ParallelRaceGroup(${commandGroupExpression(firstCommands)}, ${commandGroupExpression(secondCommands)}),\n`;
+  return `ParallelRaceGroup(${commandGroupExpression(firstCommands)}, ${commandGroupExpression(secondCommands)}),\n`;
 };
 
 forBlock['sc_wait_until'] = function (
@@ -361,7 +572,7 @@ forBlock['sc_wait_until'] = function (
   generator: PythonGenerator,
 ) {
   const condition = valueToCode(block, generator, 'CONDITION', 'False');
-  return `commands2.WaitUntilCommand(lambda: ${condition}),\n`;
+  return `WaitUntilCommand(lambda: ${condition}),\n`;
 };
 
 forBlock['sc_a301_sensor_value'] = function (

@@ -2,7 +2,11 @@
 import * as Blockly from "blockly";
 import { registerContinuousToolbox } from "@blockly/continuous-toolbox";
 import { pythonGenerator } from "blockly/python";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { createHighlighterCore, type HighlighterCore } from "shiki/core";
+import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+import pythonLang from "shiki/langs/python.mjs";
+import lightTheme from "shiki/themes/material-theme-lighter.mjs";
 import { systemCoreTheme } from "./blocklyTheme";
 import { blocks } from "./blocks/text";
 import {
@@ -30,6 +34,7 @@ import { simpleName } from "./apiCatalog";
 import {
   generateAllOpmodes,
   makeOpmodeState,
+  migrateWorkspaceState,
   newTabId,
   opmodeInfoFromState,
   type OpModeTab,
@@ -44,6 +49,42 @@ const PROJECT_STORAGE_KEY = "opmodeProject.v3";
 const blocklyDiv = ref<HTMLDivElement | null>(null);
 const generatedCode = ref("");
 const generationStatus = ref("Ready");
+
+// Syntax-highlighted HTML for the generated Python, produced by Shiki. Shiki's
+// highlighter is async, so we render into `highlightedCode` off a watcher and
+// fall back to the plain <pre><code> until the first pass resolves.
+const highlightedCode = ref("");
+
+// A single fine-grained Shiki highlighter, bundling only Python + one theme and
+// the JS regex engine (no WASM), created lazily on first use.
+let highlighterPromise: Promise<HighlighterCore> | null = null;
+const getHighlighter = () => {
+  if (!highlighterPromise) {
+    highlighterPromise = createHighlighterCore({
+      langs: [pythonLang],
+      themes: [lightTheme],
+      engine: createJavaScriptRegexEngine(),
+    });
+  }
+  return highlighterPromise;
+};
+
+watch(
+  generatedCode,
+  async (code) => {
+    try {
+      const highlighter = await getHighlighter();
+      highlightedCode.value = highlighter.codeToHtml(code, {
+        lang: "python",
+        theme: "material-theme-lighter",
+      });
+    } catch (error) {
+      console.warn("Failed to highlight generated code:", error);
+      highlightedCode.value = "";
+    }
+  },
+  { immediate: true },
+);
 
 // OpMode tabs.
 const tabs = ref<OpModeTab[]>([]);
@@ -101,16 +142,26 @@ const tabViews = computed(() =>
   }),
 );
 
+const opmodeColor = (type: OpModeType) =>
+  type === "Auto" ? "warning" : type === "Utility" ? "neutral" : "primary";
+
+const activeTabView = computed(
+  () => tabViews.value.find((tab) => tab.id === activeTabId.value) ?? null,
+);
+
+const extensionCount = computed(() => loadedExtensions.value.length);
+
 const serializeWorkspace = (): WorkspaceState =>
   workspace ? Blockly.serialization.workspaces.save(workspace) : {};
 
 const loadStateIntoWorkspace = (state: WorkspaceState) => {
   if (!workspace) return;
+  const migratedState = migrateWorkspaceState(state);
   suppressChanges = true;
   Blockly.Events.disable();
   try {
     workspace.clear();
-    Blockly.serialization.workspaces.load(state, workspace, undefined);
+    Blockly.serialization.workspaces.load(migratedState, workspace, undefined);
   } catch (error) {
     console.warn("Failed to load opmode into workspace:", error);
     workspace.clear();
@@ -221,7 +272,10 @@ const loadProject = () => {
         devices?: Device[];
       };
       if (Array.isArray(parsed.tabs) && parsed.tabs.length) {
-        tabs.value = parsed.tabs;
+        tabs.value = parsed.tabs.map((tab) => ({
+          ...tab,
+          state: migrateWorkspaceState(tab.state),
+        }));
         activeTabId.value =
           parsed.activeTabId &&
           parsed.tabs.some((t) => t.id === parsed.activeTabId)
@@ -252,10 +306,6 @@ const openMotors = () => {
   motorsOpen.value = true;
 };
 
-const closeMotors = () => {
-  motorsOpen.value = false;
-};
-
 const addMotor = () => {
   addDevice();
 };
@@ -264,20 +314,21 @@ const removeMotor = (id: string) => {
   removeDevice(id);
 };
 
-const onMotorName = (id: string, event: Event) => {
-  updateDevice(id, { name: (event.target as HTMLInputElement).value });
+const numberValue = (value: unknown) => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 };
 
-const onMotorBus = (id: string, event: Event) => {
-  updateDevice(id, {
-    bus: Number((event.target as HTMLInputElement).value) || 0,
-  });
+const onMotorName = (id: string, value: unknown) => {
+  updateDevice(id, { name: String(value ?? "") });
 };
 
-const onMotorDeviceId = (id: string, event: Event) => {
-  updateDevice(id, {
-    deviceId: Number((event.target as HTMLInputElement).value) || 0,
-  });
+const onMotorBus = (id: string, value: unknown) => {
+  updateDevice(id, { bus: numberValue(value) });
+};
+
+const onMotorDeviceId = (id: string, value: unknown) => {
+  updateDevice(id, { deviceId: numberValue(value) });
 };
 
 // --- Extensions picker -----------------------------------------------------
@@ -449,214 +500,359 @@ onBeforeUnmount(() => {
 
 <template>
   <UApp>
-    <main class="app-shell">
-      <section class="workspace-panel" aria-label="Block workspace">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">SystemCore Blocks</p>
-            <h1>Build Python robot code with blocks</h1>
-          </div>
-
-          <div class="toolbar">
-            <UBadge color="primary" variant="soft">OpMode Python</UBadge>
-            <UButton color="neutral" variant="soft" @click="openMotors">
-              Motors
-            </UButton>
-            <UButton
-              color="neutral"
-              variant="soft"
-              @click="openExtensionPicker"
-            >
-              Extensions
-            </UButton>
-            <UButton color="primary" @click="generateCode">Generate</UButton>
-          </div>
-        </header>
-
-        <!-- One tab per OpMode; each tab is its own workspace + hat block. -->
-        <nav class="opmode-tabs" aria-label="OpModes">
-          <button
-            v-for="tab in tabViews"
-            :key="tab.id"
-            type="button"
-            class="opmode-tab"
-            :class="{
-              'opmode-tab--active': tab.id === activeTabId,
-              'opmode-tab--disabled': !tab.enabled,
-            }"
-            @click="selectTab(tab.id)"
+    <main
+      class="flex h-screen min-w-[320px] flex-col overflow-hidden bg-slate-100 text-slate-950"
+    >
+      <header
+        class="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 shadow-sm"
+      >
+        <div class="flex min-w-0 items-center gap-3">
+          <div
+            class="grid size-9 shrink-0 place-items-center rounded-lg bg-teal-600 text-sm font-black text-white"
           >
-            <span class="opmode-tab-type" :data-type="tab.type">{{
-              tab.typeLabel
-            }}</span>
-            <span class="opmode-tab-name">{{ tab.name }}</span>
-            <span
-              v-if="tabViews.length > 1"
-              class="opmode-tab-close"
-              role="button"
-              aria-label="Delete opmode"
-              @click.stop="deleteOpmode(tab.id)"
-              >×</span
-            >
-          </button>
-
-          <div class="opmode-add">
-            <button
-              type="button"
-              class="opmode-add-btn"
-              @click="addOpmode('Teleop')"
-            >
-              + Teleop
-            </button>
-            <button
-              type="button"
-              class="opmode-add-btn"
-              @click="addOpmode('Auto')"
-            >
-              + Auto
-            </button>
-            <button
-              type="button"
-              class="opmode-add-btn"
-              @click="addOpmode('Utility')"
-            >
-              + Utility
-            </button>
+            SC
           </div>
-        </nav>
-
-        <div class="blockly-frame">
-          <div id="blocklyDiv" ref="blocklyDiv"></div>
+          <div class="min-w-0">
+            <h1 class="truncate text-base font-extrabold tracking-tight">
+              SystemCore Blocks
+            </h1>
+            <p class="truncate text-xs font-semibold text-slate-500">
+              {{ activeTabView?.name ?? "Robot project" }}
+            </p>
+          </div>
         </div>
-      </section>
 
-      <aside id="inspectorPane" aria-label="Generated code and status">
-        <UCard class="panel-card code-card">
-          <template #header>
-            <div class="panel-heading">
-              <h2>Generated Python</h2>
-              <UBadge color="neutral" variant="outline">Live</UBadge>
+        <div class="flex shrink-0 items-center gap-1 overflow-x-auto">
+          <UBadge color="neutral" variant="soft" class="hidden sm:inline-flex">
+            {{ generationStatus }}
+          </UBadge>
+          <UButton
+            size="sm"
+            @click="openMotors"
+          >
+            Motors
+          </UButton>
+          <UButton
+            size="sm"
+            @click="openExtensionPicker"
+          >
+            Add Extensions
+            <span v-if="extensionCount">({{ extensionCount }})</span>
+          </UButton>
+        </div>
+      </header>
+
+      <UDashboardGroup :persistent="false" class="relative min-h-0 flex-1">
+        <!-- Left panel: the block workspace. It's the resizable one, so its
+             right edge doubles as the draggable divider for the code sidebar. -->
+        <UDashboardPanel
+          id="workspace"
+          resizable
+          :default-size="64"
+          :min-size="40"
+          :max-size="82"
+          class="h-full min-h-0"
+        >
+        <section
+          class="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] bg-slate-100 p-3"
+          aria-label="Block workspace"
+        >
+          <!-- One tab per OpMode; each tab is its own workspace + hat block. -->
+          <nav
+            class="flex min-w-0 flex-wrap items-end gap-1 overflow-x-auto px-1"
+            aria-label="OpModes"
+          >
+            <div
+              v-for="tab in tabViews"
+              :key="tab.id"
+              class="group flex max-w-[250px] items-stretch rounded-t-lg border transition"
+              :class="[
+                tab.id === activeTabId
+                  ? 'border-slate-200 border-b-white bg-white text-slate-950 shadow-sm'
+                  : 'border-transparent bg-slate-200/70 text-slate-600 hover:bg-white hover:text-slate-950',
+                !tab.enabled ? 'opacity-60' : '',
+              ]"
+            >
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="sm"
+                class="min-w-0 flex-1 justify-start gap-2 rounded-b-none px-2.5 py-2"
+                @click="selectTab(tab.id)"
+              >
+                <UBadge
+                  :color="opmodeColor(tab.type)"
+                  variant="soft"
+                  size="xs"
+                  class="uppercase"
+                >
+                  {{ tab.typeLabel }}
+                </UBadge>
+                <span
+                  class="min-w-0 flex-1 truncate font-bold"
+                  :class="{ 'line-through': !tab.enabled }"
+                >
+                  {{ tab.name }}
+                </span>
+              </UButton>
+              <UButton
+                v-if="tabViews.length > 1"
+                size="xs"
+                color="error"
+                variant="ghost"
+                class="rounded-b-none rounded-l-none px-2"
+                aria-label="Delete opmode"
+                @click="deleteOpmode(tab.id)"
+                >×</UButton
+              >
             </div>
-          </template>
+            <div
+              class="ml-1 flex shrink-0 items-center gap-1 rounded-t-lg border border-dashed border-slate-300 bg-white/70 px-1.5 py-1"
+            >
+              <UButton
+                size="xs"
+                color="primary"
+                variant="soft"
+                @click="addOpmode('Teleop')"
+              >
+                + Teleop
+              </UButton>
+              <UButton
+                size="xs"
+                color="warning"
+                variant="soft"
+                @click="addOpmode('Auto')"
+              >
+                + Auto
+              </UButton>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="soft"
+                @click="addOpmode('Utility')"
+              >
+                + Utility
+              </UButton>
+            </div>
+          </nav>
 
-          <pre id="generatedCode"><code>{{ generatedCode }}</code></pre>
-        </UCard>
+          <div
+            class="min-h-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
+          >
+            <div id="blocklyDiv" ref="blocklyDiv" class="h-full w-full"></div>
+          </div>
+        </section>
+        </UDashboardPanel>
 
-
-      </aside>
+        <!-- Right panel: generated code. Fills whatever width the workspace
+             divider leaves; drag the divider between the two to resize. -->
+        <UDashboardPanel id="code" class="h-full min-h-0">
+        <aside
+          class="flex min-h-0 flex-1 flex-col overflow-hidden bg-white"
+          aria-label="Generated code and status"
+        >
+            <div
+              v-if="highlightedCode"
+              id="generatedCode"
+              class="shiki-code h-full min-h-0 overflow-auto text-[0.8rem] leading-6"
+              v-html="highlightedCode"
+            ></div>
+            <pre
+              v-else
+              id="generatedCode"
+              class="h-full min-h-0 overflow-auto  p-3 text-[0.8rem] leading-6 text-slate-100"
+            ><code>{{ generatedCode }}</code></pre>
+        </aside>
+        </UDashboardPanel>
+      </UDashboardGroup>
     </main>
 
     <!-- Motors: the project-level device registry. Motors added here are
          registered automatically in every opmode and appear in every motor
          block's dropdown. -->
-    <div v-if="motorsOpen" class="ext-overlay" @click.self="closeMotors">
-      <div class="ext-modal" role="dialog" aria-label="Manage motors">
-        <header class="ext-modal-head">
-          <div>
-            <h2>Motors</h2>
-            <p>
-              Add your robot's motors once here. Each is registered automatically
-              in every OpMode and can be picked from any motor block.
-            </p>
-          </div>
-          <UButton color="neutral" variant="ghost" @click="closeMotors">
-            Close
-          </UButton>
-        </header>
+    <UModal
+      v-model:open="motorsOpen"
+      title="Motors"
+      description="Add your robot's motors once here. Each is registered automatically in every OpMode and can be picked from any motor block."
+      :close="false"
+      :ui="{
+        content: 'w-[calc(100vw-2rem)] max-w-2xl',
+        body: 'min-h-0 overflow-hidden',
+        footer: 'justify-between',
+      }"
+    >
+      <template #body>
+        <div class="flex max-h-[min(58vh,520px)] min-h-0 flex-col gap-3">
+          <UEmpty
+            v-if="!motors.length"
+            title="No motors yet"
+            description="Add one to get started."
+            variant="soft"
+          />
 
-        <div v-if="!motors.length" class="ext-hint">
-          No motors yet. Add one to get started.
-        </div>
-
-        <ul v-else class="ext-list">
-          <li class="motor-row motor-row--head">
-            <span>Name</span>
-            <span>Bus</span>
-            <span>Device ID</span>
-            <span></span>
-          </li>
-          <li v-for="motor in motors" :key="motor.id" class="motor-row">
-            <input
-              class="ext-search motor-input"
-              type="text"
-              :value="motor.name"
-              placeholder="motor name"
-              @input="onMotorName(motor.id, $event)"
-            />
-            <input
-              class="ext-search motor-input motor-input--num"
-              type="number"
-              :value="motor.bus"
-              @input="onMotorBus(motor.id, $event)"
-            />
-            <input
-              class="ext-search motor-input motor-input--num"
-              type="number"
-              :value="motor.deviceId"
-              @input="onMotorDeviceId(motor.id, $event)"
-            />
-            <UButton
-              size="xs"
-              color="error"
-              variant="soft"
-              @click="removeMotor(motor.id)"
+          <div v-else class="grid min-h-0 gap-1 overflow-hidden">
+            <div
+              class="grid grid-cols-[minmax(0,1fr)_112px_124px_auto] items-center gap-2 px-1 text-[0.7rem] font-black uppercase tracking-wide text-slate-400"
             >
-              Remove
-            </UButton>
-          </li>
-        </ul>
-
-        <div>
-          <UButton color="primary" @click="addMotor">+ Add motor</UButton>
+              <span>Name</span>
+              <span>Bus</span>
+              <span>Device ID</span>
+              <span></span>
+            </div>
+            <ul class="grid min-h-0 gap-1 overflow-y-auto">
+              <li
+                v-for="motor in motors"
+                :key="motor.id"
+                class="grid grid-cols-[minmax(0,1fr)_112px_124px_auto] items-center gap-2 rounded-lg px-1 py-1 hover:bg-slate-50"
+              >
+                <UInput
+                  class="min-w-0"
+                  size="sm"
+                  :model-value="motor.name"
+                  placeholder="motor name"
+                  @update:model-value="onMotorName(motor.id, $event)"
+                />
+                <UInputNumber
+                  class="min-w-0"
+                  size="sm"
+                  :model-value="motor.bus"
+                  :increment="false"
+                  :decrement="false"
+                  :ui="{ base: 'text-center' }"
+                  @update:model-value="onMotorBus(motor.id, $event)"
+                />
+                <UInputNumber
+                  class="min-w-0"
+                  size="sm"
+                  :model-value="motor.deviceId"
+                  :increment="false"
+                  :decrement="false"
+                  :ui="{ base: 'text-center' }"
+                  @update:model-value="onMotorDeviceId(motor.id, $event)"
+                />
+                <UButton
+                  size="xs"
+                  color="error"
+                  variant="soft"
+                  @click="removeMotor(motor.id)"
+                >
+                  Remove
+                </UButton>
+              </li>
+            </ul>
+          </div>
         </div>
-      </div>
-    </div>
+      </template>
+
+      <template #footer="{ close }">
+        <UButton color="primary" @click="addMotor">+ Add motor</UButton>
+        <UButton color="neutral" variant="ghost" @click="close">Close</UButton>
+      </template>
+    </UModal>
 
     <!-- Extensions picker: load any RobotPy class as an escape-hatch extension. -->
-    <div v-if="pickerOpen" class="ext-overlay" @click.self="closePicker">
-      <div class="ext-modal" role="dialog" aria-label="Load extension">
-        <header class="ext-modal-head">
-          <div>
-            <h2>Extensions</h2>
-            <p>
-              Load any RobotPy class as an escape hatch. Loaded classes appear
-              in the Extensions category of the toolbox.
-            </p>
+    <UModal
+      v-model:open="pickerOpen"
+      title="Extensions"
+      description="Load any RobotPy class as an escape hatch. Loaded classes appear in the Extensions category of the toolbox."
+      :close="false"
+      :ui="{
+        content: 'w-[calc(100vw-2rem)] max-w-2xl',
+        body: 'min-h-0 overflow-hidden',
+        footer: 'justify-end',
+      }"
+      @after:leave="pickerQuery = ''"
+    >
+      <template #body>
+        <div class="flex max-h-[min(58vh,520px)] min-h-0 flex-col gap-3">
+          <UInput
+            v-model="pickerQuery"
+            size="lg"
+            type="search"
+            placeholder="Search classes (e.g. A301, Gyro, Servo)..."
+          />
+
+          <USeparator label="Available classes" />
+
+          <div v-if="catalogLoading" class="grid gap-2">
+            <USkeleton
+              v-for="index in 5"
+              :key="index"
+              class="h-14 w-full rounded-lg"
+            />
           </div>
-          <UButton color="neutral" variant="ghost" @click="closePicker">
-            Close
-          </UButton>
-        </header>
 
-        <input
-          v-model="pickerQuery"
-          class="ext-search"
-          type="search"
-          placeholder="Search classes (e.g. A301, Gyro, Servo)…"
-        />
+          <UEmpty
+            v-else-if="!filteredClasses.length"
+            title="No matching classes"
+            description="Try a different RobotPy class name."
+            variant="soft"
+          />
 
-        <p v-if="catalogLoading" class="ext-hint">Loading API catalog…</p>
-        <ul v-else class="ext-list">
-          <li
-            v-for="cls in filteredClasses"
-            :key="cls.className"
-            class="ext-row"
-          >
-            <div class="ext-row-main">
-              <span class="ext-row-name">{{ shortName(cls.className) }}</span>
-              <span class="ext-row-path">{{ cls.className }}</span>
-            </div>
-            <UButton
-              size="xs"
-              :color="isExtensionLoaded(cls.className) ? 'error' : 'primary'"
-              :variant="isExtensionLoaded(cls.className) ? 'soft' : 'solid'"
-              @click="toggleExtension(cls.className)"
+          <ul v-else class="grid min-h-0 gap-1 overflow-y-auto">
+            <li
+              v-for="cls in filteredClasses"
+              :key="cls.className"
+              class="flex items-center justify-between gap-3 rounded-lg px-3 py-2 hover:bg-slate-50"
             >
-              {{ isExtensionLoaded(cls.className) ? "Remove" : "Add" }}
-            </UButton>
-          </li>
-        </ul>
-      </div>
-    </div>
+              <div class="min-w-0">
+                <span class="block truncate text-sm font-bold">
+                  {{ shortName(cls.className) }}
+                </span>
+                <span
+                  class="block truncate text-xs font-semibold text-slate-400"
+                >
+                  {{ cls.className }}
+                </span>
+                <UBadge
+                  color="neutral"
+                  variant="soft"
+                  size="xs"
+                  class="mt-1 max-w-full truncate"
+                >
+                  {{ cls.module }}
+                </UBadge>
+              </div>
+              <UButton
+                size="xs"
+                :color="isExtensionLoaded(cls.className) ? 'error' : 'primary'"
+                :variant="isExtensionLoaded(cls.className) ? 'soft' : 'solid'"
+                @click="toggleExtension(cls.className)"
+              >
+                {{ isExtensionLoaded(cls.className) ? "Remove" : "Add" }}
+              </UButton>
+            </li>
+          </ul>
+        </div>
+      </template>
+
+      <template #footer="{ close }">
+        <UButton
+          color="neutral"
+          variant="ghost"
+          @click="
+            close();
+            closePicker();
+          "
+        >
+          Close
+        </UButton>
+      </template>
+    </UModal>
   </UApp>
 </template>
+
+<style scoped>
+/* Shiki injects its own <pre class="shiki"> with an inline background. Make it
+   fill the panel and let long lines scroll instead of wrapping. */
+.shiki-code :deep(pre.shiki) {
+  margin: 0;
+  min-height: 100%;
+  padding: 0.75rem;
+  border-radius: 0;
+}
+
+.shiki-code :deep(code) {
+  font-family: inherit;
+}
+</style>

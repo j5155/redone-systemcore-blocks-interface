@@ -18,22 +18,6 @@ const BASE_IMPORT_LINES = [
   'import wpilib',
 ];
 
-const A301_STUB = [
-  'class A301:',
-  '    def __init__(self, motor_id, bus_id):',
-  '        self.motor_id = motor_id',
-  '        self.bus_id = bus_id',
-  '',
-  '    def setPosition(self, position):',
-  '        pass',
-  '',
-  '    def setThrottle(self, throttle):',
-  '        pass',
-  '',
-  '    def setVelocity(self, velocity):',
-  '        pass',
-].join('\n');
-
 const OPMODE_TYPE_TO_DECORATOR: Record<OpModeType, string> = {
   Teleop: 'teleop',
   Auto: 'autonomous',
@@ -234,6 +218,10 @@ export const generateAllOpmodes = (tabs: OpModeTab[]): string => {
   for (const line of extraImports) {
     if (importLines.indexOf(line) === -1) importLines.push(line);
   }
+  const needsA301 = classes.some((code) => code.includes(' = A301('));
+  if (needsA301) {
+    importLines.push('from rev import A301');
+  }
   if (decoratorImports.size) {
     importLines.push(
       '',
@@ -241,5 +229,5 @@ export const generateAllOpmodes = (tabs: OpModeTab[]): string => {
     );
   }
 
-  return `${importLines.join('\n')}\n\n${A301_STUB}\n\n${classes.join('\n\n\n')}\n`;
+  return `${importLines.join('\n')}\n\n${classes.join('\n\n\n')}\n`;
 };

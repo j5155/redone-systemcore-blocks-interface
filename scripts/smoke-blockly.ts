@@ -9,7 +9,14 @@ import {
   setDevices,
 } from '../src/devices';
 import {forBlock, generateOpmodeClass} from '../src/generators/python';
-import {extensionBlocks, extensionForBlock} from '../src/extensions';
+import {
+  addExtension,
+  buildExtensionsFlyout,
+  extensionBlocks,
+  extensionForBlock,
+  removeExtension,
+} from '../src/extensions';
+import {A301_CLASS_NAME} from '../src/generated/a301';
 import {
   generateAllOpmodes,
   makeOpmodeState,
@@ -71,9 +78,38 @@ const connectStatement = (
   input!.connection!.connect(child.previousConnection!);
 };
 
+// Event/trigger hats attach their command stack below via the next connection
+// (they act as headers, not enclosing C-blocks).
+const connectNext = (parent: Blockly.Block, child: Blockly.Block) => {
+  assert(parent.nextConnection, `${parent.type} has no next connection`);
+  assert(child.previousConnection, `${child.type} has no previous connection`);
+  parent.nextConnection!.connect(child.previousConnection!);
+};
+
 const setDevice = (block: Blockly.Block) => {
   block.setFieldValue(device.id, 'DEVICE');
 };
+
+// ---------------------------------------------------------------------------
+// Operators: custom tolerance predicate plus Blockly's absolute-value block.
+// ---------------------------------------------------------------------------
+
+const withinBlock = workspace.newBlock('sc_operator_is_within');
+assert(
+  withinBlock.getInputsInline(),
+  'The is-within operator should keep its inputs inline',
+);
+connectValue(withinBlock, 'VALUE', numberBlock(12));
+connectValue(withinBlock, 'TOLERANCE', numberBlock(2));
+connectValue(withinBlock, 'TARGET', numberBlock(10));
+pythonGenerator.init(workspace);
+const withinCode = pythonGenerator.blockToCode(withinBlock);
+assert(
+  Array.isArray(withinCode),
+  'The is-within operator should generate a value expression',
+);
+assertIncludes(withinCode[0], 'abs((12) - (10)) <= abs(2)');
+withinBlock.dispose(true);
 
 // ---------------------------------------------------------------------------
 // OpMode: separate, opmode-scoped hat blocks (details / setup / start / trigger)
@@ -91,7 +127,7 @@ const runForSeconds = workspace.newBlock('sc_motor_run_for_seconds');
 setDevice(runForSeconds);
 connectValue(runForSeconds, 'POWER', numberBlock(50));
 connectValue(runForSeconds, 'SECONDS', numberBlock(2));
-connectStatement(startHat, 'COMMANDS', runForSeconds);
+connectNext(startHat, runForSeconds);
 
 // Extension (escape hatch) block chained after the run command.
 const extCall = workspace.newBlock('sc_ext_call');
@@ -104,7 +140,7 @@ runForSeconds.nextConnection!.connect(extCall.previousConnection!);
 const secondStartHat = workspace.newBlock('sc_on_start');
 const secondStartStop = workspace.newBlock('sc_motor_stop');
 setDevice(secondStartStop);
-connectStatement(secondStartHat, 'COMMANDS', secondStartStop);
+connectNext(secondStartHat, secondStartStop);
 
 // Opmode-scoped trigger with any boolean condition.
 const trigger = workspace.newBlock('sc_trigger');
@@ -114,7 +150,108 @@ triggerCond.setFieldValue('TRUE', 'BOOL');
 connectValue(trigger, 'CONDITION', triggerCond);
 const triggerStop = workspace.newBlock('sc_motor_stop');
 setDevice(triggerStop);
-connectStatement(trigger, 'COMMANDS', triggerStop);
+connectNext(trigger, triggerStop);
+
+// Hand-wrapped WPILib sensor blocks auto-create their sensor objects in
+// __init__ and generate friendly reporter / command expressions.
+const sensorTrigger = workspace.newBlock('sc_trigger');
+const digitalInput = workspace.newBlock('sc_wpilib_digital_input');
+digitalInput.setFieldValue('2', 'CHANNEL');
+connectValue(sensorTrigger, 'CONDITION', digitalInput);
+const encoderReset = workspace.newBlock('sc_wpilib_encoder_reset');
+encoderReset.setFieldValue('0', 'A_CHANNEL');
+encoderReset.setFieldValue('1', 'B_CHANNEL');
+connectNext(sensorTrigger, encoderReset);
+
+const analogInput = workspace.newBlock('sc_wpilib_analog_input_value');
+analogInput.setFieldValue('3', 'CHANNEL');
+analogInput.setFieldValue('VALUE', 'READING');
+pythonGenerator.init(workspace);
+const analogInputCode = pythonGenerator.blockToCode(analogInput);
+assert(
+  Array.isArray(analogInputCode),
+  'The analog input block should generate a value expression',
+);
+assertIncludes(analogInputCode[0], 'self.analog_input_3.getValue()');
+analogInput.dispose(true);
+
+const revStatusTrigger = workspace.newBlock('sc_trigger');
+const revConnected = workspace.newBlock('sc_rev_color_sensor_status');
+revConnected.setFieldValue('MXP', 'PORT');
+revConnected.setFieldValue('CONNECTED', 'STATUS');
+connectValue(revStatusTrigger, 'CONDITION', revConnected);
+
+const revColorValue = workspace.newBlock('sc_rev_color_sensor_value');
+revColorValue.setFieldValue('MXP', 'PORT');
+revColorValue.setFieldValue('RED', 'READING');
+assert(
+  revColorValue.getColour().toLowerCase() === '#ff8c1a',
+  'REV color sensor extension blocks should use a Scratch-style orange',
+);
+pythonGenerator.init(workspace);
+const revColorCode = pythonGenerator.blockToCode(revColorValue);
+assert(
+  Array.isArray(revColorCode),
+  'The REV color sensor value block should generate a value expression',
+);
+assertIncludes(revColorCode[0], 'self.rev_color_sensor_mxp.getColor().red');
+revColorValue.dispose(true);
+
+const revColorTrigger = workspace.newBlock('sc_rev_color_sensor_color_trigger');
+revColorTrigger.setFieldValue('MXP', 'PORT');
+const revColorField = revColorTrigger.getField('COLOR');
+assert(
+  revColorField?.constructor.name === 'FieldColourSlider',
+  'The REV color trigger should use the RGB slider colour field',
+);
+revColorTrigger.setFieldValue('rgb(0, 255, 0)', 'COLOR');
+assert(
+  revColorTrigger.getFieldValue('COLOR') === '#00ff00',
+  'RGB colour values should be stored as hex',
+);
+revColorTrigger.setFieldValue('whileTrue', 'MODE');
+const revColorStop = workspace.newBlock('sc_motor_stop');
+setDevice(revColorStop);
+connectNext(revColorTrigger, revColorStop);
+
+const revSeesColor = workspace.newBlock('sc_rev_color_sensor_sees_color');
+revSeesColor.setFieldValue('MXP', 'PORT');
+revSeesColor.setFieldValue('#0000ff', 'COLOR');
+pythonGenerator.init(workspace);
+const revSeesColorCode = pythonGenerator.blockToCode(revSeesColor);
+assert(
+  Array.isArray(revSeesColorCode),
+  'The REV sees-color block should generate a boolean expression',
+);
+assertIncludes(
+  revSeesColorCode[0],
+  'abs(self.rev_color_sensor_mxp.getColor().blue - 1) <= 0.25',
+);
+revSeesColor.dispose(true);
+
+const revProximityTrigger = workspace.newBlock(
+  'sc_rev_color_sensor_proximity_trigger',
+);
+revProximityTrigger.setFieldValue('MXP', 'PORT');
+connectValue(revProximityTrigger, 'THRESHOLD', numberBlock(250));
+const revProximityStop = workspace.newBlock('sc_motor_stop');
+setDevice(revProximityStop);
+connectNext(revProximityTrigger, revProximityStop);
+
+// Dedicated WPILib sensor triggers build their sensor object in __init__ and
+// use it in the Trigger condition, just like the REV sensor triggers.
+const digitalInputTrigger = workspace.newBlock('sc_wpilib_digital_input_trigger');
+digitalInputTrigger.setFieldValue(4, 'CHANNEL');
+const digitalInputTriggerStop = workspace.newBlock('sc_motor_stop');
+setDevice(digitalInputTriggerStop);
+connectNext(digitalInputTrigger, digitalInputTriggerStop);
+
+const encoderTrigger = workspace.newBlock('sc_wpilib_encoder_trigger');
+encoderTrigger.setFieldValue('RATE', 'READING');
+connectValue(encoderTrigger, 'THRESHOLD', numberBlock(5));
+const encoderTriggerStop = workspace.newBlock('sc_motor_stop');
+setDevice(encoderTriggerStop);
+connectNext(encoderTrigger, encoderTriggerStop);
 
 pythonGenerator.init(workspace);
 const opmodeCode = generateOpmodeClass(workspace, pythonGenerator);
@@ -123,6 +260,26 @@ assertIncludes(opmodeCode, 'class ReachZone(wpilib.PeriodicOpMode):');
 assertIncludes(opmodeCode, 'def __init__(self):');
 assertIncludes(opmodeCode, 'def start(self):');
 assertIncludes(opmodeCode, 'self.drive_motor = A301(0, 3)');
+assertIncludes(opmodeCode, 'self.digital_input_2 = wpilib.DigitalInput(2)');
+assertIncludes(opmodeCode, 'self.encoder_0_1 = wpilib.Encoder(0, 1)');
+assertIncludes(
+  opmodeCode,
+  'self.rev_color_sensor_mxp = rev.ColorSensorV3(wpilib.I2C.Port.PORT_1)',
+);
+assertIncludes(opmodeCode, 'self.digital_input_2.get()');
+assertIncludes(opmodeCode, 'self.encoder_0_1.reset()');
+assertIncludes(opmodeCode, 'self.rev_color_sensor_mxp.isConnected()');
+assertIncludes(
+  opmodeCode,
+  'abs(self.rev_color_sensor_mxp.getColor().green - 1) <= 0.25',
+);
+assertIncludes(
+  opmodeCode,
+  'self.rev_color_sensor_mxp.getProximity() >= (250)',
+);
+assertIncludes(opmodeCode, 'self.digital_input_4 = wpilib.DigitalInput(4)');
+assertIncludes(opmodeCode, 'Trigger(lambda: self.digital_input_4.get())');
+assertIncludes(opmodeCode, 'self.encoder_0_1.getRate() >= (5)');
 assertIncludes(opmodeCode, 'self.main_command: Command | None = None');
 assertIncludes(opmodeCode, 'CommandScheduler.getInstance().run()');
 assertIncludes(opmodeCode, 'self.gyro.reset()');
@@ -140,6 +297,10 @@ assert(
   'Disabled opmode should not emit a type decorator',
 );
 details.setFieldValue('TRUE', 'ENABLED');
+const fullSensorCode = generateAllOpmodes([
+  {id: 'sensor-imports', state: Blockly.serialization.workspaces.save(workspace)},
+]);
+assertIncludes(fullSensorCode, 'import rev');
 
 // ---------------------------------------------------------------------------
 // Gamepad wrappers: reading a gamepad button/axis/trigger creates the matching
@@ -154,7 +315,7 @@ gamepadButton.setFieldValue('Pressed', 'STATE');
 connectValue(gamepadTrigger, 'CONDITION', gamepadButton);
 const gamepadStop = workspace.newBlock('sc_motor_stop');
 setDevice(gamepadStop);
-connectStatement(gamepadTrigger, 'COMMANDS', gamepadStop);
+connectNext(gamepadTrigger, gamepadStop);
 
 pythonGenerator.init(workspace);
 const gamepadCode = generateOpmodeClass(workspace, pythonGenerator);
@@ -185,6 +346,53 @@ assert(
   !categoryNames.includes('Gamepad'),
   'Default toolbox must not include the Gamepad category (Teleop-only)',
 );
+assert(
+  !categoryNames.includes('WPILib Sensors'),
+  'Default toolbox must not include the WPILib Sensors extension category',
+);
+assert(
+  !categoryNames.includes('REV Sensors'),
+  'Default toolbox must not include the REV Sensors extension category',
+);
+
+const sensorsCategoryNames = buildToolbox({
+  includeGamepad: false,
+  includeWpilibSensors: true,
+}).contents
+  .filter((item) => item.kind === 'category')
+  .map((item) => (item as {name?: string}).name);
+assert(
+  sensorsCategoryNames.includes('WPILib Sensors'),
+  'WPILib Sensors should appear after adding the curated extension',
+);
+const sensorsToolbox = JSON.stringify(
+  buildToolbox({includeGamepad: false, includeWpilibSensors: true}),
+);
+assertIncludes(sensorsToolbox, 'sc_wpilib_digital_input');
+assertIncludes(sensorsToolbox, 'sc_wpilib_encoder_reset');
+assert(
+  !sensorsToolbox.includes('sc_rev_color_sensor_value'),
+  'WPILib Sensors should not include REV sensor blocks',
+);
+
+const revSensorsCategoryNames = buildToolbox({
+  includeGamepad: false,
+  includeRevSensors: true,
+}).contents
+  .filter((item) => item.kind === 'category')
+  .map((item) => (item as {name?: string}).name);
+assert(
+  revSensorsCategoryNames.includes('REV Sensors'),
+  'REV Sensors should appear after adding the separate curated extension',
+);
+const revSensorsToolbox = JSON.stringify(
+  buildToolbox({includeGamepad: false, includeRevSensors: true}),
+);
+assertIncludes(revSensorsToolbox, 'sc_rev_color_sensor_value');
+assertIncludes(revSensorsToolbox, 'sc_rev_color_sensor_status');
+assertIncludes(revSensorsToolbox, 'sc_rev_color_sensor_color_trigger');
+assertIncludes(revSensorsToolbox, 'sc_rev_color_sensor_sees_color');
+assertIncludes(revSensorsToolbox, 'sc_rev_color_sensor_proximity_trigger');
 
 const extensionsCategory = toolbox.contents.find(
   (item) => item.kind === 'category' && (item as {name?: string}).name === 'Extensions',
@@ -199,6 +407,15 @@ assert(
   'Generated API blocks must not be in the default toolbox',
 );
 
+const operatorsCategory = toolbox.contents.find(
+  (item) =>
+    item.kind === 'category' && (item as {name?: string}).name === 'Operators',
+);
+const operatorBlocks = JSON.stringify(operatorsCategory ?? {});
+assertIncludes(operatorBlocks, '"type":"math_single"');
+assertIncludes(operatorBlocks, '"OP":"ABS"');
+assertIncludes(operatorBlocks, 'sc_operator_is_within');
+
 const serialized = JSON.stringify(toolbox);
 assert(
   !serialized.includes('sc_ext_call') &&
@@ -206,6 +423,16 @@ assert(
     !serialized.includes('sc_ext_enum'),
   'Escape-hatch blocks must not be baked into the default toolbox definition',
 );
+
+addExtension(A301_CLASS_NAME);
+const a301Flyout = JSON.stringify(buildExtensionsFlyout());
+assertIncludes(a301Flyout, 'sc_a301_advanced_call');
+assertIncludes(a301Flyout, 'sc_a301_advanced_value');
+assert(
+  !a301Flyout.includes('sc_ext_call') && !a301Flyout.includes('sc_ext_value'),
+  'Loading rev.A301 should use the A301 motor-aware blocks, not generic target fields',
+);
+removeExtension(A301_CLASS_NAME);
 
 // ---------------------------------------------------------------------------
 // Motors: managed through the project registry, registered automatically, and
@@ -236,8 +463,12 @@ const registrationCheck = generateAllOpmodes([
 ]);
 assertIncludes(registrationCheck, 'from commands2 import *');
 assertIncludes(registrationCheck, 'from commands2.button import Trigger');
+assertIncludes(registrationCheck, 'from rev import A301');
 assertIncludes(registrationCheck, 'from robot import teleop');
-assertIncludes(registrationCheck, 'class A301:');
+assert(
+  !registrationCheck.includes('class A301:'),
+  'Generated code should import the real rev.A301 class instead of emitting a stub',
+);
 assertIncludes(registrationCheck, 'self.drive_motor = A301(0, 3)');
 assertIncludes(registrationCheck, 'self.arm_motor = A301(1, 7)');
 
@@ -271,12 +502,12 @@ const staleSensorConditionState = makeOpmodeState('Teleop', 'Sensor Check');
         },
       },
     },
-    COMMANDS: {
-      block: {
-        type: 'sc_motor_stop',
-        fields: {
-          DEVICE: device.id,
-        },
+  },
+  next: {
+    block: {
+      type: 'sc_motor_stop',
+      fields: {
+        DEVICE: device.id,
       },
     },
   },
@@ -331,7 +562,7 @@ const arcadeDrive = drivetrainWorkspace.newBlock('sc_drivetrain_arcade_drive');
 assert(!arcadeDrive.getField('LEFT_DEVICE'), 'Drive blocks should not pick motors');
 connectValue(arcadeDrive, 'FORWARD', numberBlock(30, drivetrainWorkspace));
 connectValue(arcadeDrive, 'TURN', numberBlock(15, drivetrainWorkspace));
-connectStatement(drivetrainStart, 'COMMANDS', arcadeDrive);
+connectNext(drivetrainStart, arcadeDrive);
 
 pythonGenerator.init(drivetrainWorkspace);
 const drivetrainCode = generateOpmodeClass(drivetrainWorkspace, pythonGenerator);
@@ -356,7 +587,7 @@ const mecanumDrive = drivetrainWorkspace.newBlock('sc_mecanum_drive');
 connectValue(mecanumDrive, 'SIDEWAYS', numberBlock(10, drivetrainWorkspace));
 connectValue(mecanumDrive, 'FORWARD', numberBlock(20, drivetrainWorkspace));
 connectValue(mecanumDrive, 'TURN', numberBlock(5, drivetrainWorkspace));
-connectStatement(drivetrainStart, 'COMMANDS', mecanumDrive);
+connectNext(drivetrainStart, mecanumDrive);
 
 pythonGenerator.init(drivetrainWorkspace);
 const mecanumCode = generateOpmodeClass(drivetrainWorkspace, pythonGenerator);

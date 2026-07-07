@@ -26,9 +26,13 @@ import {
   addExtension,
   ensureCatalogLoaded,
   getLoadedExtensions,
+  handWrappedExtensions,
   isExtensionLoaded,
   registerExtensions,
   removeExtension,
+  REV_SENSORS_EXTENSION_ID,
+  setLoadedExtensions,
+  WPILIB_SENSORS_EXTENSION_ID,
 } from "./extensions";
 import { simpleName } from "./apiCatalog";
 import {
@@ -197,6 +201,7 @@ const persistProject = () => {
         tabs: tabs.value,
         activeTabId: activeTabId.value,
         devices: getDevices(),
+        extensions: getLoadedExtensions(),
       }),
     );
   } catch (error) {
@@ -280,6 +285,7 @@ const loadProject = () => {
         tabs?: OpModeTab[];
         activeTabId?: string;
         devices?: Device[];
+        extensions?: string[];
       };
       if (Array.isArray(parsed.tabs) && parsed.tabs.length) {
         tabs.value = parsed.tabs.map((tab) => ({
@@ -293,6 +299,10 @@ const loadProject = () => {
             : parsed.tabs[0].id;
         setDevices(Array.isArray(parsed.devices) ? parsed.devices : []);
         motors.value = [...getDevices()];
+        setLoadedExtensions(
+          Array.isArray(parsed.extensions) ? parsed.extensions : [],
+        );
+        loadedExtensions.value = getLoadedExtensions();
         return;
       }
     } catch (error) {
@@ -301,6 +311,8 @@ const loadProject = () => {
     }
   }
 
+  setLoadedExtensions([]);
+  loadedExtensions.value = getLoadedExtensions();
   const tab: OpModeTab = {
     id: newTabId(),
     state: makeOpmodeState("Teleop", "My Teleop"),
@@ -380,6 +392,9 @@ const toggleExtension = (className: string) => {
     addExtension(className);
   }
   loadedExtensions.value = getLoadedExtensions();
+  syncToolboxForActive();
+  persistProject();
+  generateCode();
 };
 
 const shortName = (className: string) => simpleName(className);
@@ -399,10 +414,10 @@ const refreshContinuousFlyout = (ws: Blockly.WorkspaceSvg) => {
   }
 };
 
-// The Gamepad category only makes sense in Teleop opmodes (driver input isn't
-// read in autonomous/utility). Rebuild the toolbox whenever the active opmode's
-// type changes so the category appears/disappears. `null` forces a first build.
-let gamepadShown: boolean | null = null;
+// The Gamepad category only makes sense in Teleop opmodes, and curated
+// extensions can add their own categories. Rebuild the toolbox whenever those
+// visible-category flags change. `null` forces a first build.
+let toolboxStateKey: string | null = null;
 
 const syncToolboxForActive = () => {
   if (!workspace) return;
@@ -410,9 +425,14 @@ const syncToolboxForActive = () => {
   const includeGamepad = tab
     ? opmodeInfoFromState(tab.state).type === "Teleop"
     : false;
-  if (includeGamepad === gamepadShown) return;
-  gamepadShown = includeGamepad;
-  workspace.updateToolbox(buildToolbox({ includeGamepad }));
+  const includeWpilibSensors = isExtensionLoaded(WPILIB_SENSORS_EXTENSION_ID);
+  const includeRevSensors = isExtensionLoaded(REV_SENSORS_EXTENSION_ID);
+  const nextStateKey = `${includeGamepad}:${includeWpilibSensors}:${includeRevSensors}`;
+  if (nextStateKey === toolboxStateKey) return;
+  toolboxStateKey = nextStateKey;
+  workspace.updateToolbox(
+    buildToolbox({ includeGamepad, includeWpilibSensors, includeRevSensors }),
+  );
   refreshContinuousFlyout(workspace);
 };
 
@@ -526,11 +546,6 @@ onBeforeUnmount(() => {
         class="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 shadow-sm"
       >
         <div class="flex min-w-0 items-center gap-3">
-          <div
-            class="grid size-9 shrink-0 place-items-center rounded-lg bg-teal-600 text-sm font-black text-white"
-          >
-            SC
-          </div>
           <div class="min-w-0">
             <h1 class="truncate text-base font-extrabold tracking-tight">
               SystemCore Blocks
@@ -567,9 +582,9 @@ onBeforeUnmount(() => {
         <UDashboardPanel
           id="workspace"
           resizable
-          :default-size="64"
+          :default-size="72"
           :min-size="40"
-          :max-size="82"
+          :max-size="100"
           class="h-full min-h-0"
         >
         <section
@@ -626,7 +641,7 @@ onBeforeUnmount(() => {
               >
             </div>
             <div
-              class="ml-1 flex shrink-0 items-center gap-1 rounded-t-lg border border-dashed border-slate-300 bg-white/70 px-1.5 py-1"
+              class="ml-1 flex shrink-0 items-center gap-1 rounded-t-lg border  border-slate-300 bg-white/70 px-1.5 py-1"
             >
               <UButton
                 size="xs"
@@ -769,11 +784,11 @@ onBeforeUnmount(() => {
       </template>
     </UModal>
 
-    <!-- Extensions picker: load any RobotPy class as an escape-hatch extension. -->
+    <!-- Extensions picker: curated hand-wrapped extensions plus raw RobotPy classes. -->
     <UModal
       v-model:open="pickerOpen"
       title="Extensions"
-      description="Load any RobotPy class as an escape hatch. Loaded classes appear in the Extensions category of the toolbox."
+      description="Add hand-wrapped block sets or load a raw RobotPy class."
       :close="false"
       :ui="{
         content: 'w-[calc(100vw-2rem)] max-w-2xl',
@@ -784,6 +799,55 @@ onBeforeUnmount(() => {
     >
       <template #body>
         <div class="flex max-h-[min(58vh,520px)] min-h-0 flex-col gap-3">
+          <USeparator label="Scratch-style extensions" />
+
+          <ul class="grid gap-2 sm:grid-cols-2">
+            <li
+              v-for="extension in handWrappedExtensions"
+              :key="extension.id"
+              class="flex min-h-32 flex-col justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm"
+              :style="{ '--extension-color': extension.color }"
+            >
+              <div class="flex min-w-0 items-start gap-3">
+                <span
+                  class="grid size-11 shrink-0 place-items-center rounded-lg bg-[var(--extension-color)] text-lg font-black text-white shadow-sm"
+                  aria-hidden="true"
+                >
+                  WP
+                </span>
+                <div class="min-w-0">
+                  <h3 class="truncate text-sm font-black text-slate-900">
+                    {{ extension.name }}
+                  </h3>
+                  <p class="mt-1 text-xs font-semibold leading-5 text-slate-500">
+                    {{ extension.summary }}
+                  </p>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex min-w-0 flex-wrap gap-1">
+                  <UBadge
+                    v-for="chip in extension.chips"
+                    :key="chip"
+                    color="neutral"
+                    variant="soft"
+                    size="xs"
+                  >
+                    {{ chip }}
+                  </UBadge>
+                </div>
+                <UButton
+                  size="xs"
+                  :color="isExtensionLoaded(extension.id) ? 'error' : 'primary'"
+                  :variant="isExtensionLoaded(extension.id) ? 'soft' : 'solid'"
+                  @click="toggleExtension(extension.id)"
+                >
+                  {{ isExtensionLoaded(extension.id) ? "Remove" : "Add" }}
+                </UButton>
+              </div>
+            </li>
+          </ul>
+
           <UInput
             v-model="pickerQuery"
             size="lg"

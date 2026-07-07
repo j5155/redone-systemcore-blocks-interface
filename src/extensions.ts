@@ -20,11 +20,43 @@ import {
   surfacedMethods,
   type ApiClass,
 } from './apiCatalog';
+import {
+  A301_CLASS_NAME,
+  A301_INSTANCE_METHODS,
+  A301_VALUE_METHODS,
+} from './generated/a301';
 
 const extensionColour = '#5C81A6';
 
 export const EXTENSIONS_TOOLBOX_CATEGORY = 'SYSTEMCORE_EXTENSIONS';
 export const ADD_EXTENSION_CALLBACK = 'ADD_EXTENSION';
+export const WPILIB_SENSORS_EXTENSION_ID = 'handwrapped:wpilib-sensors';
+export const REV_SENSORS_EXTENSION_ID = 'handwrapped:rev-sensors';
+
+export const handWrappedExtensions = [
+  {
+    id: WPILIB_SENSORS_EXTENSION_ID,
+    name: 'WPILib Sensors',
+    summary:
+      'Digital inputs, analog sensors, encoders, and duty-cycle encoders.',
+    color: '#FF4C4C',
+    chips: ['DIO', 'Analog', 'Encoders'],
+  },
+  {
+    id: REV_SENSORS_EXTENSION_ID,
+    name: 'REV Sensors',
+    summary: 'REV color sensor readings, proximity, and connection status.',
+    color: '#FF8C1A',
+    chips: ['Color', 'Proximity', 'I2C'],
+  },
+] as const;
+
+const handWrappedExtensionIds = new Set(
+  handWrappedExtensions.map((extension) => extension.id),
+);
+
+export const isHandWrappedExtension = (id: string) =>
+  handWrappedExtensionIds.has(id as (typeof handWrappedExtensions)[number]['id']);
 
 // ---------------------------------------------------------------------------
 // Loaded-extension registry
@@ -51,6 +83,16 @@ export const removeExtension = (className: string) => {
   if (loadedExtensions.delete(className)) {
     notify();
   }
+};
+
+export const setLoadedExtensions = (classNames: string[]) => {
+  loadedExtensions.clear();
+  for (const className of classNames) {
+    if (typeof className === 'string' && className.trim()) {
+      loadedExtensions.add(className);
+    }
+  }
+  notify();
 };
 
 export const onExtensionsChanged = (listener: () => void) => {
@@ -199,6 +241,31 @@ const enumBlocksFor = (cls: ApiClass): FlyoutItem[] => {
   return items;
 };
 
+const firstA301Method = (
+  methods: typeof A301_INSTANCE_METHODS,
+  preferredId: string,
+) =>
+  methods.find((method) => method.id === preferredId)?.id ||
+  methods[0]?.id ||
+  '';
+
+const a301BlocksFor = (): FlyoutItem[] => [
+  {
+    kind: 'block',
+    type: 'sc_a301_advanced_call',
+    fields: {
+      METHOD: firstA301Method(A301_INSTANCE_METHODS, 'clearFaults'),
+    },
+  },
+  {
+    kind: 'block',
+    type: 'sc_a301_advanced_value',
+    fields: {
+      METHOD: firstA301Method(A301_VALUE_METHODS, 'getThrottle'),
+    },
+  },
+];
+
 // The catalog is loaded lazily. Once loaded we cache class lookups so the
 // (synchronous) toolbox callback can build flyouts immediately.
 let classIndex: Map<string, ApiClass> | null = null;
@@ -209,7 +276,7 @@ export const ensureCatalogLoaded = async () => {
   return catalog;
 };
 
-const buildExtensionsFlyout = (): FlyoutItem[] => {
+export const buildExtensionsFlyout = (): FlyoutItem[] => {
   const contents: FlyoutItem[] = [
     {
       kind: 'button',
@@ -218,11 +285,13 @@ const buildExtensionsFlyout = (): FlyoutItem[] => {
     },
   ];
 
-  const loaded = getLoadedExtensions();
+  const loaded = getLoadedExtensions().filter(
+    (className) => !isHandWrappedExtension(className),
+  );
   if (!loaded.length) {
     contents.push({
       kind: 'label',
-      text: 'No extensions loaded — an escape hatch for the full RobotPy API.',
+      text: 'No generated API classes loaded.',
     });
     return contents;
   }
@@ -230,6 +299,10 @@ const buildExtensionsFlyout = (): FlyoutItem[] => {
   for (const className of loaded) {
     const cls = classIndex?.get(className);
     contents.push({kind: 'label', text: className});
+    if (className === A301_CLASS_NAME) {
+      contents.push(...a301BlocksFor());
+      continue;
+    }
     if (!cls) continue;
 
     for (const method of surfacedMethods(cls)) {

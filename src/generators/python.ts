@@ -20,6 +20,14 @@ import {
 // This file has no side effects!
 export const forBlock = Object.create(null);
 
+type GeneratorDefinitions = {definitions_: Record<string, string>};
+
+const registerImport = (generator: PythonGenerator, moduleName: string) => {
+  (generator as unknown as GeneratorDefinitions).definitions_[
+    `import_${moduleName}`
+  ] = `import ${moduleName}`;
+};
+
 const pythonKeywords = new Set([
   'False',
   'None',
@@ -150,6 +158,19 @@ const commandLinesForStatement = (
   inputName: string,
 ) => compactStatementLines(generator.statementToCode(block, inputName));
 
+// Event/trigger hats no longer enclose their commands; the command stack hangs
+// off the hat's next connection instead. Follow that chain to collect the lines.
+const commandLinesForNext = (
+  block: Blockly.Block,
+  generator: PythonGenerator,
+) => {
+  const next = block.getNextBlock();
+  if (!next) return [];
+  const code = generator.blockToCode(next);
+  const codeStr = Array.isArray(code) ? code[0] : code;
+  return compactStatementLines(typeof codeStr === 'string' ? codeStr : '');
+};
+
 const commandGroupExpression = (commands: string[]) =>
   commands.length
     ? `SequentialCommandGroup(${commands.map(stripCommandComma).join(', ')})`
@@ -201,6 +222,11 @@ forBlock['sc_opmode_details'] = () => '';
 forBlock['sc_on_setup'] = () => '';
 forBlock['sc_on_start'] = () => '';
 forBlock['sc_trigger'] = () => '';
+forBlock['sc_rev_color_sensor_color_trigger'] = () => '';
+forBlock['sc_rev_color_sensor_proximity_trigger'] = () => '';
+forBlock['sc_wpilib_digital_input_trigger'] = () => '';
+forBlock['sc_wpilib_analog_input_trigger'] = () => '';
+forBlock['sc_wpilib_encoder_trigger'] = () => '';
 forBlock['sc_movement_motors'] = () => '';
 
 const GAMEPAD_BLOCK_TYPES = [
@@ -327,6 +353,190 @@ const gamepadsInWorkspace = (workspace: Blockly.Workspace) => {
   return [...gamepads].sort();
 };
 
+const intField = (block: Blockly.Block, fieldName: string, fallback: number) => {
+  const value = Number(block.getFieldValue(fieldName));
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : fallback;
+};
+
+const sensorObjectName = (prefix: string, ...channels: number[]) =>
+  `${prefix}_${channels.join('_')}`;
+
+const sensorReference = (prefix: string, ...channels: number[]) =>
+  `self.${sensorObjectName(prefix, ...channels)}`;
+
+const digitalInputReference = (block: Blockly.Block) =>
+  sensorReference('digital_input', intField(block, 'CHANNEL', 0));
+
+const analogInputReference = (block: Blockly.Block) =>
+  sensorReference('analog_input', intField(block, 'CHANNEL', 0));
+
+// wpilib.AnalogInput getter for the block's READING field. Shared by the value
+// read block and the analog-input trigger.
+const analogInputMethod = (block: Blockly.Block) =>
+  block.getFieldValue('READING') === 'VALUE' ? 'getValue' : 'getVoltage';
+
+const encoderChannels = (block: Blockly.Block) =>
+  [
+    intField(block, 'A_CHANNEL', 0),
+    intField(block, 'B_CHANNEL', 1),
+  ] as const;
+
+const encoderReference = (block: Blockly.Block) =>
+  sensorReference('encoder', ...encoderChannels(block));
+
+// wpilib.Encoder getter for the block's READING field. Shared by the value read
+// block and the encoder trigger.
+const encoderMethod = (block: Blockly.Block) => {
+  const reading = block.getFieldValue('READING');
+  return reading === 'RATE' ? 'getRate' : reading === 'COUNT' ? 'get' : 'getDistance';
+};
+
+const dutyCycleEncoderReference = (block: Blockly.Block) =>
+  sensorReference('duty_cycle_encoder', intField(block, 'CHANNEL', 0));
+
+const analogEncoderReference = (block: Blockly.Block) =>
+  sensorReference('analog_encoder', intField(block, 'CHANNEL', 0));
+
+const analogAccelerometerReference = (block: Blockly.Block) =>
+  sensorReference('analog_accelerometer', intField(block, 'CHANNEL', 0));
+
+const analogPotentiometerReference = (block: Blockly.Block) =>
+  sensorReference('analog_potentiometer', intField(block, 'CHANNEL', 0));
+
+const i2cPortKey = (block: Blockly.Block) =>
+  block.getFieldValue('PORT') === 'MXP' ? 'mxp' : 'onboard';
+
+const i2cPortExpression = (block: Blockly.Block) =>
+  block.getFieldValue('PORT') === 'MXP'
+    ? 'wpilib.I2C.Port.PORT_1'
+    : 'wpilib.I2C.Port.PORT_0';
+
+const revColorSensorReference = (block: Blockly.Block) =>
+  `self.rev_color_sensor_${i2cPortKey(block)}`;
+
+const hexColorToRgb = (value: string | null) => {
+  const named: Record<string, string> = {
+    BLUE: '#0000ff',
+    GREEN: '#00ff00',
+    RED: '#ff0000',
+  };
+  const color = (value && named[value] ? named[value] : value || '#ff0000')
+    .trim()
+    .toLowerCase();
+  const short = /^#?([0-9a-f]{3})$/.exec(color);
+  const match = /^#?([0-9a-f]{6})$/.exec(color);
+  const hex = short
+    ? short[1]
+        .split('')
+        .map((char) => `${char}${char}`)
+        .join('')
+    : match
+      ? match[1]
+      : 'ff0000';
+  return {
+    red: parseInt(hex.slice(0, 2), 16) / 255,
+    green: parseInt(hex.slice(2, 4), 16) / 255,
+    blue: parseInt(hex.slice(4, 6), 16) / 255,
+  };
+};
+
+const revColorSensorSeesColorExpression = (block: Blockly.Block) => {
+  const sensor = revColorSensorReference(block);
+  const target = hexColorToRgb(block.getFieldValue('COLOR'));
+  const tolerance = '0.25';
+  return [
+    `abs(${sensor}.getColor().red - ${target.red}) <= ${tolerance}`,
+    `abs(${sensor}.getColor().green - ${target.green}) <= ${tolerance}`,
+    `abs(${sensor}.getColor().blue - ${target.blue}) <= ${tolerance}`,
+  ].join(' and ');
+};
+
+const sensorInitLines = (
+  workspace: Blockly.Workspace,
+  generator: PythonGenerator,
+) => {
+  const lines = new Map<string, string>();
+  const add = (name: string, expression: string) => {
+    if (!lines.has(name)) {
+      lines.set(name, `        self.${name} = ${expression}`);
+    }
+  };
+
+  for (const type of ['sc_wpilib_digital_input', 'sc_wpilib_digital_input_trigger']) {
+    for (const block of workspace.getBlocksByType(type, false)) {
+      const channel = intField(block, 'CHANNEL', 0);
+      add(sensorObjectName('digital_input', channel), `wpilib.DigitalInput(${channel})`);
+    }
+  }
+  for (const type of ['sc_wpilib_analog_input_value', 'sc_wpilib_analog_input_trigger']) {
+    for (const block of workspace.getBlocksByType(type, false)) {
+      const channel = intField(block, 'CHANNEL', 0);
+      add(sensorObjectName('analog_input', channel), `wpilib.AnalogInput(${channel})`);
+    }
+  }
+  for (const type of [
+    'sc_wpilib_encoder_value',
+    'sc_wpilib_encoder_reset',
+    'sc_wpilib_encoder_trigger',
+  ]) {
+    for (const block of workspace.getBlocksByType(type, false)) {
+      const [aChannel, bChannel] = encoderChannels(block);
+      add(
+        sensorObjectName('encoder', aChannel, bChannel),
+        `wpilib.Encoder(${aChannel}, ${bChannel})`,
+      );
+    }
+  }
+  for (const type of [
+    'sc_wpilib_duty_cycle_encoder_value',
+    'sc_wpilib_duty_cycle_encoder_connected',
+  ]) {
+    for (const block of workspace.getBlocksByType(type, false)) {
+      const channel = intField(block, 'CHANNEL', 0);
+      add(
+        sensorObjectName('duty_cycle_encoder', channel),
+        `wpilib.DutyCycleEncoder(${channel})`,
+      );
+    }
+  }
+  for (const block of workspace.getBlocksByType('sc_wpilib_analog_encoder_value', false)) {
+    const channel = intField(block, 'CHANNEL', 0);
+    add(sensorObjectName('analog_encoder', channel), `wpilib.AnalogEncoder(${channel})`);
+  }
+  for (const block of workspace.getBlocksByType('sc_wpilib_analog_accelerometer_value', false)) {
+    const channel = intField(block, 'CHANNEL', 0);
+    add(
+      sensorObjectName('analog_accelerometer', channel),
+      `wpilib.AnalogAccelerometer(${channel})`,
+    );
+  }
+  for (const block of workspace.getBlocksByType('sc_wpilib_analog_potentiometer_value', false)) {
+    const channel = intField(block, 'CHANNEL', 0);
+    add(
+      sensorObjectName('analog_potentiometer', channel),
+      `wpilib.AnalogPotentiometer(${channel})`,
+    );
+  }
+  for (const type of [
+    'sc_rev_color_sensor_value',
+    'sc_rev_color_sensor_status',
+    'sc_rev_color_sensor_color_trigger',
+    'sc_rev_color_sensor_sees_color',
+    'sc_rev_color_sensor_proximity_trigger',
+  ]) {
+    for (const block of workspace.getBlocksByType(type, false)) {
+      registerImport(generator, 'rev');
+      const key = i2cPortKey(block);
+      add(
+        `rev_color_sensor_${key}`,
+        `rev.ColorSensorV3(${i2cPortExpression(block)})`,
+      );
+    }
+  }
+
+  return [...lines.values()];
+};
+
 const buildTriggerLines = (
   triggers: Blockly.Block[],
   generator: PythonGenerator,
@@ -334,10 +544,10 @@ const buildTriggerLines = (
   if (!triggers.length) return [];
   const lines: string[] = [];
   triggers.forEach((trigger, index) => {
-    const condition = valueToCode(trigger, generator, 'CONDITION', 'False');
+    const condition = triggerConditionExpression(trigger, generator);
     const mode =
       trigger.getFieldValue('MODE') === 'whileTrue' ? 'whileTrue' : 'onTrue';
-    const commands = commandLinesForStatement(trigger, generator, 'COMMANDS');
+    const commands = commandLinesForNext(trigger, generator);
     const name = `trigger_${index + 1}`;
     lines.push(
       `        ${name} = Trigger(lambda: ${condition})`,
@@ -346,6 +556,40 @@ const buildTriggerLines = (
     if (index < triggers.length - 1) lines.push('');
   });
   return lines;
+};
+
+const triggerBlocksInWorkspace = (workspace: Blockly.Workspace) => [
+  ...workspace.getBlocksByType('sc_trigger', false),
+  ...workspace.getBlocksByType('sc_rev_color_sensor_color_trigger', false),
+  ...workspace.getBlocksByType('sc_rev_color_sensor_proximity_trigger', false),
+  ...workspace.getBlocksByType('sc_wpilib_digital_input_trigger', false),
+  ...workspace.getBlocksByType('sc_wpilib_analog_input_trigger', false),
+  ...workspace.getBlocksByType('sc_wpilib_encoder_trigger', false),
+];
+
+const triggerConditionExpression = (
+  trigger: Blockly.Block,
+  generator: PythonGenerator,
+) => {
+  if (trigger.type === 'sc_rev_color_sensor_color_trigger') {
+    return revColorSensorSeesColorExpression(trigger);
+  }
+  if (trigger.type === 'sc_rev_color_sensor_proximity_trigger') {
+    const threshold = valueToCode(trigger, generator, 'THRESHOLD', '200');
+    return `${revColorSensorReference(trigger)}.getProximity() >= (${threshold})`;
+  }
+  if (trigger.type === 'sc_wpilib_digital_input_trigger') {
+    return `${digitalInputReference(trigger)}.get()`;
+  }
+  if (trigger.type === 'sc_wpilib_analog_input_trigger') {
+    const threshold = valueToCode(trigger, generator, 'THRESHOLD', '0');
+    return `${analogInputReference(trigger)}.${analogInputMethod(trigger)}() >= (${threshold})`;
+  }
+  if (trigger.type === 'sc_wpilib_encoder_trigger') {
+    const threshold = valueToCode(trigger, generator, 'THRESHOLD', '0');
+    return `${encoderReference(trigger)}.${encoderMethod(trigger)}() >= (${threshold})`;
+  }
+  return valueToCode(trigger, generator, 'CONDITION', 'False');
 };
 
 /**
@@ -374,13 +618,13 @@ export const generateOpmodeClass = (
   }
 
   const triggerLines = buildTriggerLines(
-    workspace.getBlocksByType('sc_trigger', false),
+    triggerBlocksInWorkspace(workspace),
     generator,
   );
 
   const startCommandStacks: string[][] = [];
   for (const hat of workspace.getBlocksByType('sc_on_start', false)) {
-    startCommandStacks.push(commandLinesForStatement(hat, generator, 'COMMANDS'));
+    startCommandStacks.push(commandLinesForNext(hat, generator));
   }
 
   const decorators: string[] = [];
@@ -395,6 +639,7 @@ export const generateOpmodeClass = (
       `        self.gamepad${gamepad} = wpilib.Gamepad(${gamepadPort(gamepad)})`,
     );
   }
+  initBody.push(...sensorInitLines(workspace, generator));
   // Every motor in the project registry is constructed automatically at the top
   // of __init__(); there is no per-opmode "register motor" block anymore.
   for (const device of getDevices()) {
@@ -592,6 +837,100 @@ forBlock['sc_a301_sensor_value'] = function (
   };
 
   return [expressions[sensor] || expressions.VELOCITY, Order.FUNCTION_CALL];
+};
+
+forBlock['sc_operator_is_within'] = function (
+  block: Blockly.Block,
+  generator: PythonGenerator,
+) {
+  const value = valueToCode(block, generator, 'VALUE', '0');
+  const tolerance = valueToCode(block, generator, 'TOLERANCE', '0');
+  const target = valueToCode(block, generator, 'TARGET', '0');
+  return [
+    `abs((${value}) - (${target})) <= abs(${tolerance})`,
+    Order.RELATIONAL,
+  ];
+};
+
+forBlock['sc_wpilib_digital_input'] = function (block: Blockly.Block) {
+  return [`${digitalInputReference(block)}.get()`, Order.FUNCTION_CALL];
+};
+
+forBlock['sc_wpilib_analog_input_value'] = function (block: Blockly.Block) {
+  return [
+    `${analogInputReference(block)}.${analogInputMethod(block)}()`,
+    Order.FUNCTION_CALL,
+  ];
+};
+
+forBlock['sc_wpilib_encoder_value'] = function (block: Blockly.Block) {
+  return [
+    `${encoderReference(block)}.${encoderMethod(block)}()`,
+    Order.FUNCTION_CALL,
+  ];
+};
+
+forBlock['sc_wpilib_encoder_reset'] = function (block: Blockly.Block) {
+  return instantCommand(`${encoderReference(block)}.reset()`);
+};
+
+forBlock['sc_wpilib_duty_cycle_encoder_value'] = function (
+  block: Blockly.Block,
+) {
+  return [`${dutyCycleEncoderReference(block)}.get()`, Order.FUNCTION_CALL];
+};
+
+forBlock['sc_wpilib_duty_cycle_encoder_connected'] = function (
+  block: Blockly.Block,
+) {
+  return [
+    `${dutyCycleEncoderReference(block)}.isConnected()`,
+    Order.FUNCTION_CALL,
+  ];
+};
+
+forBlock['sc_wpilib_analog_encoder_value'] = function (block: Blockly.Block) {
+  return [`${analogEncoderReference(block)}.get()`, Order.FUNCTION_CALL];
+};
+
+forBlock['sc_wpilib_analog_accelerometer_value'] = function (
+  block: Blockly.Block,
+) {
+  return [
+    `${analogAccelerometerReference(block)}.getAcceleration()`,
+    Order.FUNCTION_CALL,
+  ];
+};
+
+forBlock['sc_wpilib_analog_potentiometer_value'] = function (
+  block: Blockly.Block,
+) {
+  return [`${analogPotentiometerReference(block)}.get()`, Order.FUNCTION_CALL];
+};
+
+forBlock['sc_rev_color_sensor_value'] = function (block: Blockly.Block) {
+  const sensor = revColorSensorReference(block);
+  const reading = block.getFieldValue('READING');
+  const expressions: Record<string, string> = {
+    BLUE: `${sensor}.getColor().blue`,
+    GREEN: `${sensor}.getColor().green`,
+    IR: `${sensor}.getIR()`,
+    PROXIMITY: `${sensor}.getProximity()`,
+    RED: `${sensor}.getColor().red`,
+  };
+
+  return [expressions[reading] || expressions.PROXIMITY, Order.FUNCTION_CALL];
+};
+
+forBlock['sc_rev_color_sensor_status'] = function (block: Blockly.Block) {
+  const sensor = revColorSensorReference(block);
+  const method =
+    block.getFieldValue('STATUS') === 'HAS_RESET' ? 'hasReset' : 'isConnected';
+  return [`${sensor}.${method}()`, Order.FUNCTION_CALL];
+};
+
+forBlock['sc_rev_color_sensor_sees_color'] = function (block: Blockly.Block) {
+  return [revColorSensorSeesColorExpression(block), Order.LOGICAL_AND];
 };
 
 forBlock['sc_gamepad_button'] = function (block: Blockly.Block) {

@@ -27,6 +27,35 @@ const numberShadow = (value: number): ToolboxBlock => ({
   },
 });
 
+const absoluteValueBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'math_single',
+  fields: {
+    OP: 'ABS',
+  },
+  inputs: {
+    NUM: {
+      shadow: numberShadow(-1),
+    },
+  },
+});
+
+const isWithinBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_operator_is_within',
+  inputs: {
+    VALUE: {
+      shadow: numberShadow(0),
+    },
+    TOLERANCE: {
+      shadow: numberShadow(1),
+    },
+    TARGET: {
+      shadow: numberShadow(0),
+    },
+  },
+});
+
 // Motor blocks in the flyout leave DEVICE unset so the field defaults to the
 // first registered motor (the motor list is managed in the Motors modal).
 const runForSecondsBlock = (): ToolboxBlock => ({
@@ -109,6 +138,173 @@ const sensorValueBlock = (): ToolboxBlock => ({
   type: 'sc_a301_sensor_value',
 });
 
+const digitalInputBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_digital_input',
+  fields: {
+    CHANNEL: channel,
+  },
+});
+
+const analogInputBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_analog_input_value',
+  fields: {
+    CHANNEL: channel,
+    READING: 'VOLTAGE',
+  },
+});
+
+const encoderValueBlock = (aChannel = 0, bChannel = 1): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_encoder_value',
+  fields: {
+    A_CHANNEL: aChannel,
+    B_CHANNEL: bChannel,
+    READING: 'DISTANCE',
+  },
+});
+
+const encoderResetBlock = (aChannel = 0, bChannel = 1): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_encoder_reset',
+  fields: {
+    A_CHANNEL: aChannel,
+    B_CHANNEL: bChannel,
+  },
+});
+
+const dutyCycleEncoderValueBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_duty_cycle_encoder_value',
+  fields: {
+    CHANNEL: channel,
+  },
+});
+
+const dutyCycleEncoderConnectedBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_duty_cycle_encoder_connected',
+  fields: {
+    CHANNEL: channel,
+  },
+});
+
+const analogEncoderBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_analog_encoder_value',
+  fields: {
+    CHANNEL: channel,
+  },
+});
+
+const analogAccelerometerBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_analog_accelerometer_value',
+  fields: {
+    CHANNEL: channel,
+  },
+});
+
+const analogPotentiometerBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_analog_potentiometer_value',
+  fields: {
+    CHANNEL: channel,
+  },
+});
+
+const digitalInputTriggerBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_digital_input_trigger',
+  fields: {
+    CHANNEL: channel,
+    MODE: 'onTrue',
+  },
+});
+
+const analogInputTriggerBlock = (channel = 0): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_analog_input_trigger',
+  fields: {
+    CHANNEL: channel,
+    READING: 'VOLTAGE',
+    MODE: 'onTrue',
+  },
+  inputs: {
+    THRESHOLD: {
+      shadow: numberShadow(1),
+    },
+  },
+});
+
+const encoderTriggerBlock = (aChannel = 0, bChannel = 1): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_wpilib_encoder_trigger',
+  fields: {
+    A_CHANNEL: aChannel,
+    B_CHANNEL: bChannel,
+    READING: 'DISTANCE',
+    MODE: 'onTrue',
+  },
+  inputs: {
+    THRESHOLD: {
+      shadow: numberShadow(10),
+    },
+  },
+});
+
+const revColorSensorValueBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_rev_color_sensor_value',
+  fields: {
+    PORT: 'ONBOARD',
+    READING: 'PROXIMITY',
+  },
+});
+
+const revColorSensorStatusBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_rev_color_sensor_status',
+  fields: {
+    PORT: 'ONBOARD',
+    STATUS: 'CONNECTED',
+  },
+});
+
+const revColorSensorColorTriggerBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_rev_color_sensor_color_trigger',
+  fields: {
+    PORT: 'ONBOARD',
+    COLOR: '#ff0000',
+    MODE: 'onTrue',
+  },
+});
+
+const revColorSensorSeesColorBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_rev_color_sensor_sees_color',
+  fields: {
+    PORT: 'ONBOARD',
+    COLOR: '#ff0000',
+  },
+});
+
+const revColorSensorProximityTriggerBlock = (): ToolboxBlock => ({
+  kind: 'block',
+  type: 'sc_rev_color_sensor_proximity_trigger',
+  fields: {
+    PORT: 'ONBOARD',
+    MODE: 'onTrue',
+  },
+  inputs: {
+    THRESHOLD: {
+      shadow: numberShadow(200),
+    },
+  },
+});
+
 const sensorGreaterThanBlock = (value: number): ToolboxBlock => ({
   kind: 'block',
   type: 'logic_compare',
@@ -157,15 +353,58 @@ const gamepadCategory = {
         CONDITION: {
           block: gamepadButtonBlock('SouthFace', 'Pressed'),
         },
-        COMMANDS: {
-          block: stopMotorBlock(),
-        },
+      },
+      next: {
+        block: stopMotorBlock(),
       },
     },
   ],
 };
 
-export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
+const wpilibSensorsCategory = {
+  kind: 'category',
+  name: 'WPILib Sensors',
+  categorystyle: 'wpilib_sensors_category',
+  cssConfig: categoryCss('wpilib-sensors'),
+  contents: [
+    digitalInputTriggerBlock(0),
+    analogInputTriggerBlock(0),
+    encoderTriggerBlock(0, 1),
+    digitalInputBlock(0),
+    analogInputBlock(0),
+    encoderValueBlock(0, 1),
+    encoderResetBlock(0, 1),
+    dutyCycleEncoderValueBlock(0),
+    dutyCycleEncoderConnectedBlock(0),
+    analogEncoderBlock(0),
+    analogAccelerometerBlock(0),
+    analogPotentiometerBlock(0),
+  ],
+};
+
+const revSensorsCategory = {
+  kind: "category",
+  name: "REV Sensors",
+  categorystyle: "rev_sensors_category",
+  cssConfig: categoryCss("rev-sensors"),
+  contents: [
+    revColorSensorColorTriggerBlock(),
+    revColorSensorProximityTriggerBlock(),
+    revColorSensorSeesColorBlock(),
+    revColorSensorValueBlock(),
+    revColorSensorStatusBlock(),
+  ],
+};
+
+export const buildToolbox = ({
+  includeGamepad,
+  includeWpilibSensors = false,
+  includeRevSensors = false,
+}: {
+  includeGamepad: boolean;
+  includeWpilibSensors?: boolean;
+  includeRevSensors?: boolean;
+}) => ({
   kind: 'categoryToolbox',
   contents: [
     {
@@ -181,10 +420,8 @@ export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
         {
           kind: 'block',
           type: 'sc_on_start',
-          inputs: {
-            COMMANDS: {
-              block: runForSecondsBlock(),
-            },
+          next: {
+            block: runForSecondsBlock(),
           },
         },
         {
@@ -206,9 +443,9 @@ export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
             CONDITION: {
               block: sensorGreaterThanBlock(0),
             },
-            COMMANDS: {
-              block: stopMotorBlock(),
-            },
+          },
+          next: {
+            block: stopMotorBlock(),
           },
         },
       ],
@@ -333,6 +570,8 @@ export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
       cssConfig: categoryCss('sensing'),
       contents: [sensorValueBlock()],
     },
+    ...(includeWpilibSensors ? [wpilibSensorsCategory] : []),
+    ...(includeRevSensors ? [revSensorsCategory] : []),
     ...(includeGamepad ? [gamepadCategory] : []),
     {
       kind: 'category',
@@ -353,6 +592,7 @@ export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
             },
           },
         },
+        absoluteValueBlock(),
         {
           kind: 'block',
           type: 'math_number_property',
@@ -366,6 +606,7 @@ export const buildToolbox = ({includeGamepad}: {includeGamepad: boolean}) => ({
           kind: 'block',
           type: 'logic_compare',
         },
+        isWithinBlock(),
         {
           kind: 'block',
           type: 'logic_operation',

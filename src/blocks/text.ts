@@ -22,7 +22,7 @@ const addText = {
   ],
   previousStatement: null,
   nextStatement: null,
-  colour: 160,
+  style: 'looks_blocks',
   tooltip: '',
   helpUrl: '',
 };

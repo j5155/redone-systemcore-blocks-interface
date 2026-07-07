@@ -5,15 +5,19 @@
  */
 
 import * as Blockly from 'blockly';
+import { registerContinuousToolbox } from "@blockly/continuous-toolbox";
+
 import {blocks} from './blocks/text';
 import {forBlock} from './generators/javascript';
 import {javascriptGenerator} from 'blockly/javascript';
 import {save, load} from './serialization';
 import {toolbox} from './toolbox';
+import {applyScratchBlockPaletteOverrides, scratchTheme} from './blocklyTheme';
 // @ts-ignore
 import './index.css';
 
 // Register the blocks and generator with Blockly
+applyScratchBlockPaletteOverrides();
 Blockly.common.defineBlocks(blocks);
 Object.assign(javascriptGenerator.forBlock, forBlock);
 
@@ -25,7 +29,20 @@ const blocklyDiv = document.getElementById('blocklyDiv');
 if (!blocklyDiv) {
   throw new Error(`div with id 'blocklyDiv' not found`);
 }
-const ws = Blockly.inject(blocklyDiv, {toolbox, renderer: 'zelos'});
+
+// Inject Blockly.
+registerContinuousToolbox();
+
+const ws = Blockly.inject(blocklyDiv, {
+  toolbox,
+  theme: scratchTheme,
+  renderer: "zelos",
+  plugins: {
+    flyoutsVerticalToolbox: "ContinuousFlyout",
+    metricsManager: "ContinuousMetrics",
+    toolbox: "ContinuousToolbox",
+  },
+});
 
 // This function resets the code and output divs, shows the
 // generated code from the workspace, and evals the code.
